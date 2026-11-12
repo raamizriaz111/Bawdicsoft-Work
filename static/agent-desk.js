@@ -242,7 +242,10 @@
 
   function getContrastColor(hex) {
     if (!hex) return "#ffffff";
-    const c = hex.replace("#", "");
+    let c = String(hex).replace("#", "").trim();
+    if (c.length === 3) {
+      c = c.split("").map((ch) => ch + ch).join("");
+    }
     const r = parseInt(c.substr(0, 2), 16) || 0;
     const g = parseInt(c.substr(2, 2), 16) || 0;
     const b = parseInt(c.substr(4, 2), 16) || 0;
@@ -381,6 +384,7 @@
     const selectedPreset = presetsData[presetId];
     if (selectedPreset) {
       currentConfig = { ...selectedPreset };
+      currentSessionId = "visitor_" + Math.random().toString(36).substring(2, 9) + "_" + Date.now();
       populateForm(currentConfig);
       applyPreviewStyling(currentConfig);
       renderPreviewCards(currentConfig.previewCards || []);
@@ -388,6 +392,36 @@
       resetChatView(currentConfig.welcomeMessage);
       showToast(`Switched template to "${selectedPreset.name}"`, "info");
     }
+  });
+
+  // Sync live sidebar edits so tone, conversion objective, prompts & KB take effect immediately
+  function syncFormToConfig() {
+    currentConfig.businessName = businessNameInput.value.trim();
+    currentConfig.agentName = agentNameInput.value.trim();
+    currentConfig.brandColor = brandColorInput.value;
+    currentConfig.tone = toneInput.value.trim();
+    currentConfig.agentGoal = agentGoalInput.value.trim();
+    currentConfig.knowledgeBase = knowledgeBaseTextarea.value.trim();
+    currentConfig.domain = `${(currentConfig.businessName || "client").toLowerCase().replace(/[^a-z0-9]/g, "")}.com`;
+    if (quickPromptsInput) {
+      const rawPrompts = quickPromptsInput.value.trim();
+      currentConfig.quickPrompts = rawPrompts
+        ? rawPrompts.split(",").map((s) => s.trim()).filter(Boolean)
+        : [];
+    }
+  }
+
+  [businessNameInput, agentNameInput, toneInput, agentGoalInput, quickPromptsInput, knowledgeBaseTextarea].forEach((el) => {
+    if (!el) return;
+    el.addEventListener("input", () => {
+      syncFormToConfig();
+      if (el === businessNameInput || el === agentNameInput) {
+        applyPreviewStyling(currentConfig);
+      }
+      if (el === businessNameInput || el === quickPromptsInput) {
+        renderQuickPrompts(currentConfig.quickPrompts);
+      }
+    });
   });
 
   // Color picker & Quick swatches
@@ -419,27 +453,18 @@
 
   // Apply and Restart Chat
   applyBtn.addEventListener("click", async () => {
-    currentConfig.businessName = businessNameInput.value.trim();
-    currentConfig.agentName = agentNameInput.value.trim();
-    currentConfig.brandColor = brandColorInput.value;
-    currentConfig.tone = toneInput.value.trim();
-    currentConfig.agentGoal = agentGoalInput.value.trim();
-    currentConfig.knowledgeBase = knowledgeBaseTextarea.value.trim();
-    currentConfig.domain = `${currentConfig.businessName.toLowerCase().replace(/[^a-z0-9]/g, "")}.com`;
-
-    if (quickPromptsInput && quickPromptsInput.value.trim()) {
-      currentConfig.quickPrompts = quickPromptsInput.value.split(",").map(s => s.trim()).filter(Boolean);
-    }
+    syncFormToConfig();
 
     applyBtn.disabled = true;
     applyBtn.innerHTML = `<span>Saving...</span>`;
 
     try {
-      await fetch("/api/config", {
+      const cfgRes = await fetch("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(currentConfig)
       });
+      if (!cfgRes.ok) throw new Error("Failed to save config");
 
       // Reset visitor session
       await fetch("/api/session/reset", {
@@ -476,6 +501,7 @@
     const text = chatInputField.value.trim();
     if (!text) return;
 
+    syncFormToConfig();
     appendChatMessage("user", text);
     chatInputField.value = "";
     chatInputField.disabled = true;
@@ -495,13 +521,22 @@
 
       hideTyping();
       const data = await res.json();
-      appendChatMessage("bot", data.reply);
+      if (!res.ok) {
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
+      appendChatMessage("bot", data.reply || "How else can I assist you?");
+      if (data.analysis) {
+        appendBehaviorInsight(data.analysis);
+      }
 
       updateMetrics(data.chatsCount, data.leadsCount);
 
       if (data.leadCaptured) {
         AudioFeedback.chime();
-        showToast(`Verified Lead: ${data.leadCaptured.name || "Client"} (${data.leadCaptured.email})`, "success");
+        const contactSummary = [data.leadCaptured.email, data.leadCaptured.phone].filter(Boolean).join(" • ") || "Contact Saved";
+        showToast(`Verified Lead: ${data.leadCaptured.name || "Client"} (${contactSummary})`, "success");
+        refreshLeadsList();
+      } else if (data.leadUpdated) {
         refreshLeadsList();
       }
     } catch (err) {
@@ -558,16 +593,47 @@
       const timeStr = new Date(lead.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       const initial = (lead.name || "C").charAt(0).toUpperCase();
 
+      const behaviorHtml = (lead.buyer_intent || lead.emotion)
+        ? `<div class="lead-behavior-row">${buildBehaviorBadgesHtml(lead, true)}</div>`
+        : "";
+
+      const emailHtml = lead.email
+        ? `<a href="mailto:${escapeHtml(lead.email)}" class="lead-card-email" onclick="event.stopPropagation()">${escapeHtml(lead.email)}</a>`
+        : "";
+      const phoneHref = lead.phone
+        ? `tel:${escapeHtml(String(lead.phone).replace(/[^\d+]/g, ""))}`
+        : "";
+      const phoneHtml = lead.phone
+        ? `<a href="${phoneHref}" class="lead-card-phone" onclick="event.stopPropagation()">${escapeHtml(lead.phone)}</a>`
+        : "";
+      const contactsHtml = (emailHtml || phoneHtml)
+        ? `<div class="lead-card-contacts">${emailHtml}${phoneHtml}</div>`
+        : "";
+
+      const qualChips = [
+        lead.specific_need ? `<span class="lead-qual-chip">${escapeHtml(lead.specific_need)}</span>` : "",
+        lead.budget ? `<span class="lead-qual-chip">Budget: ${escapeHtml(lead.budget)}</span>` : "",
+        lead.timeline ? `<span class="lead-qual-chip">When: ${escapeHtml(lead.timeline)}</span>` : "",
+        lead.preferred_slot ? `<span class="lead-qual-chip">Slot: ${escapeHtml(lead.preferred_slot)}</span>` : ""
+      ].filter(Boolean).join("");
+      const qualHtml = qualChips ? `<div class="lead-qual-chips">${qualChips}</div>` : "";
+      const summaryText = lead.deal_summary || lead.interest || "Service Inquiry";
+
       item.innerHTML = `
         <div class="lead-card-header">
           <div class="lead-name-badge">
             <span class="lead-avatar-sm">${initial}</span>
             <span class="lead-card-name">${escapeHtml(lead.name || "Interested Visitor")}</span>
           </div>
-          <span class="lead-card-time">${timeStr}</span>
+          <div class="lead-card-meta-right">
+            <span class="lead-card-time">${timeStr}</span>
+            <button type="button" class="lead-delete-btn" title="Remove this lead" aria-label="Remove this lead">&times;</button>
+          </div>
         </div>
-        <a href="mailto:${escapeHtml(lead.email)}" class="lead-card-email" onclick="event.stopPropagation()">${escapeHtml(lead.email)}</a>
-        <div class="lead-card-interest">${escapeHtml(lead.interest || "Service Inquiry")}</div>
+        ${contactsHtml}
+        <div class="lead-card-interest">${escapeHtml(summaryText)}</div>
+        ${qualHtml}
+        ${behaviorHtml}
         <div class="lead-view-transcript-btn">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
@@ -575,6 +641,27 @@
           <span>View conversation transcript</span>
         </div>
       `;
+
+      const deleteBtn = item.querySelector(".lead-delete-btn");
+      if (deleteBtn) {
+        deleteBtn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          try {
+            const delRes = await fetch("/api/leads/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ leadId: lead.id })
+            });
+            if (!delRes.ok) throw new Error("Failed to remove lead");
+            const data = await delRes.json();
+            renderLeads(data.leads || []);
+            updateMetrics(data.chatsCount, data.leadsCount);
+            showToast("Lead removed", "info");
+          } catch (err) {
+            showToast("Failed to remove lead", "info");
+          }
+        });
+      }
 
       item.addEventListener("click", () => openTranscriptModal(lead.session_id, lead.name));
       leadsListBox.appendChild(item);
@@ -596,26 +683,51 @@
     try {
       const res = await fetch(`/api/session/transcript?sessionId=${encodeURIComponent(sessionId)}`);
       const data = await res.json();
+      const profile = data.userProfile || {};
+      const qualTags = [
+        typeof profile.lead_score === "number" ? `Score ${profile.lead_score}` : null,
+        profile.sales_stage ? `Stage: ${String(profile.sales_stage).replace(/_/g, " ")}` : null,
+        profile.specific_need ? `Need: ${profile.specific_need}` : null,
+        profile.budget ? `Budget: ${profile.budget}` : null,
+        profile.timeline ? `Timeline: ${profile.timeline}` : null,
+        profile.preferred_slot ? `Slot: ${profile.preferred_slot}` : null,
+        profile.email ? `Email: ${profile.email}` : null,
+        profile.phone ? `Phone: ${profile.phone}` : null,
+      ].filter(Boolean);
+
+      const summaryHtml = qualTags.length > 0
+        ? `
+          <div class="transcript-profile-summary">
+            <div class="transcript-summary-title">Captured Profile & Qualification</div>
+            <div class="lead-qual-chips">${qualTags.map((t) => `<span class="lead-qual-chip">${escapeHtml(t)}</span>`).join("")}</div>
+            ${profile.deal_summary ? `<div class="lead-deal-summary">${escapeHtml(profile.deal_summary)}</div>` : ""}
+          </div>
+        `
+        : "";
+
       if (!data.messages || data.messages.length === 0) {
-        transcriptMessagesContainer.innerHTML = `<div style="text-align:center; color:var(--text-tertiary); padding: 20px;">No messages recorded in this session.</div>`;
+        transcriptMessagesContainer.innerHTML = summaryHtml + `<div style="text-align:center; color:var(--text-tertiary); padding: 20px;">No messages recorded in this session.</div>`;
         return;
       }
 
-      transcriptMessagesContainer.innerHTML = data.messages.map((m) => {
+      const msgsHtml = data.messages.map((m) => {
         const isBot = m.role === "assistant";
         const userColor = currentConfig.brandColor || "#00a884";
-        const bubbleBg = isBot ? "#172132" : userColor;
-        const bubbleColor = isBot ? "#ffffff" : getContrastColor(userColor);
+        const bubbleStyle = isBot
+          ? ""
+          : ` style="background:${userColor}; color:${getContrastColor(userColor)};"`;
         const roleLabel = isBot ? (currentConfig.agentName || "Assistant") : (clientName || "Visitor");
         return `
           <div style="display:flex; flex-direction:column; align-items: ${isBot ? 'flex-start' : 'flex-end'};">
-            <span style="font-size:10px; color:var(--text-tertiary); margin-bottom:2px;">${roleLabel}</span>
-            <div style="background:${bubbleBg}; color:${bubbleColor}; padding:8px 12px; border-radius:10px; font-size:12.5px; max-width:85%; box-shadow: 0 2px 6px rgba(0,0,0,0.25);">
+            <span style="font-size:10px; color:var(--text-tertiary); margin-bottom:2px;">${escapeHtml(roleLabel)}</span>
+            <div class="transcript-bubble ${isBot ? "bot" : "user"}"${bubbleStyle}>
               ${escapeHtml(m.content)}
             </div>
           </div>
         `;
       }).join("");
+
+      transcriptMessagesContainer.innerHTML = summaryHtml + msgsHtml;
     } catch (e) {
       transcriptMessagesContainer.innerHTML = `<div style="color:#ef4444; text-align:center;">Failed to load transcript.</div>`;
     }
@@ -625,6 +737,52 @@
   transcriptModal.addEventListener("click", (e) => {
     if (e.target === transcriptModal) transcriptModal.classList.remove("active");
   });
+
+  function buildBehaviorBadgesHtml(behavior, compact = false) {
+    const intentLabels = {
+      hot: "Hot Lead",
+      warm: "Warm",
+      cold: "Cold",
+      off_topic: "Off-Topic"
+    };
+    const rawIntent = String(behavior.buyer_intent || "cold").toLowerCase();
+    const safeIntentClass = Object.prototype.hasOwnProperty.call(intentLabels, rawIntent) ? rawIntent : "cold";
+    const intentText = intentLabels[safeIntentClass];
+    const emotionText = String(behavior.emotion || "neutral")
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (ch) => ch.toUpperCase());
+
+    const scoreHtml = typeof behavior.lead_score === "number"
+      ? `<span class="behavior-pill score-pill">Score ${behavior.lead_score}</span>`
+      : "";
+    const stageText = behavior.sales_stage
+      ? String(behavior.sales_stage).replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase())
+      : "";
+    const stageHtml = (!compact && stageText)
+      ? `<span class="behavior-pill stage-pill">${escapeHtml(stageText)}</span>`
+      : "";
+    const tacticHtml = (!compact && behavior.sales_tactic)
+      ? `<span class="behavior-tactic-text">${escapeHtml(behavior.sales_tactic)}</span>`
+      : "";
+
+    return `
+      <span class="behavior-pill intent-${safeIntentClass}">${escapeHtml(intentText)}</span>
+      <span class="behavior-pill emotion-pill">${escapeHtml(emotionText)}</span>
+      ${scoreHtml}
+      ${stageHtml}
+      ${tacticHtml}
+    `;
+  }
+
+  function appendBehaviorInsight(analysis) {
+    const container = document.getElementById("chat-messages");
+    if (!container || !analysis) return;
+    const strip = document.createElement("div");
+    strip.className = "behavior-insight-strip";
+    strip.innerHTML = buildBehaviorBadgesHtml(analysis, false);
+    container.appendChild(strip);
+    container.scrollTop = container.scrollHeight;
+  }
 
   // Start new visitor chat
   newVisitorBtn.addEventListener("click", async () => {
@@ -639,13 +797,37 @@
     refreshLeadsList();
   });
 
-  // Clear leads
+  // Clear leads (2-step inline confirm — works reliably even when browser confirm() popups are blocked)
+  let clearConfirmTimer = null;
+  function resetClearConfirmState() {
+    if (clearConfirmTimer) {
+      clearTimeout(clearConfirmTimer);
+      clearConfirmTimer = null;
+    }
+    clearLeadsBtn.classList.remove("confirming");
+    clearLeadsBtn.textContent = "Clear lead history";
+  }
+
   clearLeadsBtn.addEventListener("click", async () => {
-    if (confirm("Clear all captured leads?")) {
-      await fetch("/api/leads/clear", { method: "POST" });
+    if (!clearLeadsBtn.classList.contains("confirming")) {
+      clearLeadsBtn.classList.add("confirming");
+      clearLeadsBtn.textContent = "Click again to confirm clear";
+      clearConfirmTimer = setTimeout(resetClearConfirmState, 4000);
+      return;
+    }
+
+    resetClearConfirmState();
+    clearLeadsBtn.disabled = true;
+    try {
+      const res = await fetch("/api/leads/clear", { method: "POST" });
+      if (!res.ok) throw new Error("Failed to clear leads");
       renderLeads([]);
       updateMetrics(metricChats.textContent, 0);
       showToast("All leads cleared", "info");
+    } catch (err) {
+      showToast("Failed to clear leads", "info");
+    } finally {
+      clearLeadsBtn.disabled = false;
     }
   });
 
@@ -660,12 +842,14 @@
   // Embed Modal Tab Handling
   function updateEmbedSnippet() {
     const origin = window.location.origin;
+    const cssUrl = `${origin}/static/chat-widget.css?v=2.8`;
+    const jsUrl = `${origin}/static/chat-widget.js?v=2.8`;
     if (currentEmbedTab === "html") {
       embedInstructionText.textContent = "Paste these 2 lines into the <head> or before </body> of your client's HTML, Webflow, or Shopify site:";
       embedCodeSnippet.textContent = 
 `<!-- ${currentConfig.businessName || "Chatbot"} Widget Embed -->\n` +
-`<link rel="stylesheet" href="${origin}/static/chat-widget.css">\n` +
-`<script src="${origin}/static/chat-widget.js" defer></script>`;
+`<link rel="stylesheet" href="${cssUrl}">\n` +
+`<script src="${jsUrl}" defer></script>`;
     } else if (currentEmbedTab === "react") {
       embedInstructionText.textContent = "Use next/script in your Next.js app or a standard useEffect in React:";
       embedCodeSnippet.textContent =
@@ -673,8 +857,8 @@
 `export default function ChatbotWidget() {\n` +
 `  return (\n` +
 `    <>\n` +
-`      <link rel="stylesheet" href="${origin}/static/chat-widget.css" />\n` +
-`      <Script src="${origin}/static/chat-widget.js" strategy="lazyOnload" />\n` +
+`      <link rel="stylesheet" href="${cssUrl}" />\n` +
+`      <Script src="${jsUrl}" strategy="lazyOnload" />\n` +
 `    </>\n` +
 `  );\n` +
 `}`;
@@ -682,8 +866,8 @@
       embedInstructionText.textContent = "In WordPress: Go to Appearance -> Theme File Editor (or use 'Insert Headers and Footers' plugin):";
       embedCodeSnippet.textContent =
 `<!-- Add to header.php before </head> -->\n` +
-`<link rel="stylesheet" href="${origin}/static/chat-widget.css">\n` +
-`<script src="${origin}/static/chat-widget.js" defer></script>`;
+`<link rel="stylesheet" href="${cssUrl}">\n` +
+`<script src="${jsUrl}" defer></script>`;
     }
   }
 

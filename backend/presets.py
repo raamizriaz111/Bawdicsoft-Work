@@ -154,6 +154,7 @@ PRESETS = {
             "- Payment Terms: Milestone-based payments tied directly to verified sprint deliverables.\n\n"
             "6. CONTACT & HIRING:\n"
             "- Company Email: info@bawdicsoft.com\n"
+            "- Careers & Job Opportunities: Please email your CV/resume and portfolio to info@bawdicsoft.com so our hiring team can review your profile for open or upcoming roles.\n"
             "- Direct CEO Email: syedbilalhashmi@bawdicsoft.com\n"
             "- WhatsApp / Direct Phone: +92 300 828 7711\n"
             "- Consultation Requirement: Share project requirements, timeline, and email address to schedule an architectural discovery call."
@@ -591,7 +592,7 @@ PRESETS = {
         "agentName": "Support Assistant",
         "brandColor": "#8b5cf6",
         "tone": "Helpful, friendly, precise, and direct",
-        "agentGoal": "Answer questions and capture customer contact details (name and email)",
+        "agentGoal": "Answer questions and capture customer contact details (name, phone, or email)",
         "heroBadge": "Custom Assistant Workspace",
         "heroTitle": "Tailored Solutions for Your Business",
         "heroSubtitle": "Providing top-notch products and high-touch customer support 24/7.",

@@ -1,41 +1,41 @@
 {
-  "id": "dental",
-  "name": "Dental clinic",
-  "businessName": "Brightside Dental",
-  "domain": "brightsidedental.com",
-  "agentName": "Mia",
-  "brandColor": "#3b82f6",
-  "tone": "politely",
-  "agentGoal": "Book a first visit or capture contact details (name and phone/email)",
-  "heroBadge": "Premier Cosmetic & Family Dentistry",
-  "heroTitle": "Gentle dentistry for the whole family",
-  "heroSubtitle": "Painless ultrasonic cleanings, laser whitening, invisible aligners and emergency care in Clifton, Karachi.",
-  "welcomeMessage": "Hi, I'm Mia from Brightside Dental. How can I help you today?",
+  "id": "bawdicsoft",
+  "name": "Software agency (BawdicSoft)",
+  "businessName": "BawdicSoft",
+  "domain": "bawdicsoft.com",
+  "agentName": "Bilal",
+  "brandColor": "#ef4444",
+  "tone": "Innovative, sharp, technical and consultative",
+  "agentGoal": "Gather project requirements and schedule an architectural consultation with engineering leads",
+  "heroBadge": "Software, AI & Web3 Engineering Agency",
+  "heroTitle": "Architecting Next-Gen AI & Web3 Solutions",
+  "heroSubtitle": "Custom AI conversational agents, enterprise cloud microservices, and audited blockchain architectures.",
+  "welcomeMessage": "Welcome to BawdicSoft! How can our engineering team bring your software vision to life?",
   "quickPrompts": [
-    "How much is a cleaning?",
-    "What is your address & timings?",
-    "Do you do invisible braces?",
-    "Tell me about your doctors & portfolio"
+    "What AI & software services do you offer?",
+    "What projects have you built in your portfolio?",
+    "How much does a custom AI chatbot cost?",
+    "Where is your office located?"
   ],
   "previewCards": [
     {
-      "icon": "\ud83e\uddb7",
-      "title": "Ultrasonic Cleaning",
-      "desc": "Deep plaque removal, tartar scaling & high polish.",
-      "price": "PKR 4,000"
+      "icon": "\ud83e\udd16",
+      "title": "Autonomous AI Agents",
+      "desc": "Custom LLM integrations, RAG pipelines & multi-agent systems.",
+      "price": "Enterprise Grade"
     },
     {
-      "icon": "\u2728",
-      "title": "Laser Whitening",
-      "desc": "Up to 8 shades whiter in a single 45-min visit.",
-      "price": "PKR 18,000"
+      "icon": "\u26d3\ufe0f",
+      "title": "Web3 & Blockchain",
+      "desc": "Smart contracts, tokenomics & crypto escrow architecture.",
+      "price": "Audited Code"
     },
     {
-      "icon": "\ud83e\ude7a",
-      "title": "Clear Aligners",
-      "desc": "Free 3D digital scan & orthodontic assessment.",
-      "price": "From PKR 150k"
+      "icon": "\ud83d\udcf1",
+      "title": "Full-Stack Web & Mobile",
+      "desc": "Scalable cloud applications built with React, Next.js & Python.",
+      "price": "Turnkey Delivery"
     }
   ],
-  "knowledgeBase": "Brightside Dental \u2014 Premier Cosmetic & Family Dental Practice.\n\n1. LOCATIONS & OPERATING HOURS:\n- Address: Suite 201, Al-Murtaza Commercial, Clifton Block 4, Karachi (Opposite Ocean Mall).\n- Working Hours: Monday to Friday from 9:00am to 7:00pm, Saturday from 10:00am to 4:00pm. Closed on Sundays.\n- Parking: Free reserved valet parking available on site for all patients.\n- Walk-ins: Accepted for emergency toothaches and trauma during business hours.\n\n2. SERVICES & SPECIALTIES:\n- Consultation & 3D Digital Oral Scan: Full mouth examination with low-radiation digital X-rays.\n- Ultrasonic Teeth Cleaning & Scaling: Painless plaque and tartar removal with fluoride polish.\n- In-Clinic Laser Whitening: Philips Zoom laser technology, 45-minute procedure, brightens up to 8 shades.\n- Invisible Aligners & Orthodontics: Clear transparent aligners and modern ceramic braces.\n- Dental Implants: Certified Nobel Biocare titanium implants with lifetime warranty.\n- Root Canal Therapy (RCT): Painless single-session rotary endodontics with dental microscope.\n- Cosmetic Porcelain Veneers: Custom aesthetic smile makeovers.\n- Pediatric Dentistry: Child-friendly preventative care and cavity sealants.\n\n3. PRICING & FEE SCHEDULE:\n- Consultation & 3D Scan: PKR 2,000 (100% waived/free if any procedure is performed).\n- Routine Teeth Cleaning & Scaling: PKR 4,000 flat.\n- Professional Laser Whitening: PKR 18,000 complete session.\n- Braces & Aligners Consultation: Free. Complete treatment packages start from PKR 150,000.\n- Root Canal Treatment: Starting from PKR 22,000 per tooth.\n- Dental Implants: Starting from PKR 90,000 per tooth (implant + crown).\n- Porcelain Veneers: PKR 35,000 per tooth.\n- Payment Methods: Cash, Visa, Mastercard, PayPak, and 0% markup 3-to-6 month installment plans on credit cards.\n\n4. PORTFOLIO & TRACK RECORD:\n- 12+ years of clinical excellence in Clifton, Karachi.\n- Over 18,000 successful smile transformations and patient treatments completed.\n- Over 4,500 successful clear aligner and orthodontic cases.\n- Awarded 'Best Cosmetic Dental Practice in Sindh' at the 2024 Healthcare Excellence Awards.\n- 4.9 out of 5 stars based on 950+ verified patient reviews.\n\n5. LEAD DENTISTS & SPECIALISTS:\n- Dr. Sarah Khan (BDS, RDS) \u2014 Senior Cosmetic & Restorative Dentist (12+ years clinical experience).\n- Dr. Taimoor Ali (BDS, MDS Orthodontics, Gold Medalist) \u2014 Head of Orthodontics & Clear Aligners.\n\n6. BOOKING & CONTACT:\n- Phone: +92 21 3587 9900\n- WhatsApp: +92 300 899 4422\n- Email: care@brightsidedental.com\n- Booking Requirement: We collect patient full name and phone number/email to reserve and confirm an appointment slot."
+  "knowledgeBase": "what is the semart contacted will be secure"
 }

@@ -17,10 +17,24 @@
     storageKey: "universal_chatbot_session_id",
   };
 
-  let sessionId = localStorage.getItem(CONFIG.storageKey);
+  function safeStorageGet(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function safeStorageSet(key, val) {
+    try {
+      localStorage.setItem(key, val);
+    } catch (e) {}
+  }
+
+  let sessionId = safeStorageGet(CONFIG.storageKey);
   if (!sessionId) {
     sessionId = "session_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();
-    localStorage.setItem(CONFIG.storageKey, sessionId);
+    safeStorageSet(CONFIG.storageKey, sessionId);
   }
 
   let botConfig = {
@@ -56,7 +70,13 @@
         </div>
       </div>
       <div class="chat-widget-actions">
-        <button class="chat-widget-btn-icon" id="cw-close-btn" title="Close chat">
+        <button class="chat-widget-btn-icon" id="cw-reset-btn" title="Start new conversation" aria-label="Start new conversation">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+          </svg>
+        </button>
+        <button class="chat-widget-btn-icon" id="cw-close-btn" title="Close chat" aria-label="Close chat">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -84,6 +104,7 @@
   const promptsEl = document.getElementById("cw-prompts");
   const inputEl = document.getElementById("cw-input");
   const sendBtn = document.getElementById("cw-send-btn");
+  const resetBtn = document.getElementById("cw-reset-btn");
   const closeBtn = document.getElementById("cw-close-btn");
   const headerTitle = document.getElementById("cw-header-title");
   const avatarEl = document.getElementById("cw-avatar");
@@ -165,6 +186,18 @@
     });
   }
 
+  function getContrastColor(hex) {
+    if (!hex) return "#ffffff";
+    let c = String(hex).replace("#", "").trim();
+    if (c.length === 3) {
+      c = c.split("").map((ch) => ch + ch).join("");
+    }
+    const r = parseInt(c.substr(0, 2), 16) || 0;
+    const g = parseInt(c.substr(2, 2), 16) || 0;
+    const b = parseInt(c.substr(4, 2), 16) || 0;
+    return (r * 299 + g * 587 + b * 114) / 1000 >= 165 ? "#090c13" : "#ffffff";
+  }
+
   // Fetch dynamic config from backend
   async function loadConfig() {
     try {
@@ -181,14 +214,14 @@
         if (botConfig.brandColor) {
           document.documentElement.style.setProperty("--chat-primary", botConfig.brandColor);
           document.documentElement.style.setProperty("--chat-primary-gradient", botConfig.brandColor);
-          const c = botConfig.brandColor.replace("#", "");
-          const r = parseInt(c.substr(0, 2), 16) || 0;
-          const g = parseInt(c.substr(2, 2), 16) || 0;
-          const b = parseInt(c.substr(4, 2), 16) || 0;
-          const contrast = (r * 299 + g * 587 + b * 114) / 1000 >= 165 ? "#090c13" : "#ffffff";
+          const contrast = getContrastColor(botConfig.brandColor);
           document.documentElement.style.setProperty("--chat-primary-contrast", contrast);
           launcher.style.background = botConfig.brandColor;
-          if (headerEl) headerEl.style.background = botConfig.brandColor;
+          launcher.style.color = contrast;
+          if (headerEl) {
+            headerEl.style.background = botConfig.brandColor;
+            headerEl.style.color = contrast;
+          }
         }
 
         renderWidgetQuickPrompts(botConfig.quickPrompts || []);
@@ -249,7 +282,7 @@
       if (!res.ok) throw new Error("Chat request failed");
 
       const data = await res.json();
-      appendMessage("bot", data.reply);
+      appendMessage("bot", data.reply || "How else can I assist you?");
     } catch (err) {
       hideTypingIndicator();
       appendMessage("bot", "I am having trouble connecting right now. Please try again shortly.");
@@ -259,6 +292,25 @@
       sendBtn.disabled = false;
       inputEl.focus();
     }
+  }
+
+  if (resetBtn) {
+    resetBtn.addEventListener("click", async () => {
+      try {
+        await fetch(`${CONFIG.apiBase}/api/session/reset`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "bypass-tunnel-reminder": "1"
+          },
+          body: JSON.stringify({ sessionId: sessionId })
+        });
+      } catch (e) {}
+      sessionId = "session_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();
+      safeStorageSet(CONFIG.storageKey, sessionId);
+      messagesEl.innerHTML = "";
+      appendMessage("bot", botConfig.welcomeMessage || "Hello! How can I help you today?");
+    });
   }
 
   sendBtn.addEventListener("click", sendMessage);
