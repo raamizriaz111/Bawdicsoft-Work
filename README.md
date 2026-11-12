@@ -1,3 +1,13 @@
+---
+title: BawdicSoft AI Agent Studio
+emoji: 🤖
+colorFrom: cyan
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # 🤖 AI Agent Studio
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)

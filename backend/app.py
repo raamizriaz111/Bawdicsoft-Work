@@ -408,7 +408,8 @@ routes = [
     Mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static"),
 ]
 
-app = Starlette(debug=True, routes=routes, middleware=middleware)
+DEBUG_MODE = os.environ.get("DEBUG", "false").lower() == "true"
+app = Starlette(debug=DEBUG_MODE, routes=routes, middleware=middleware)
 
 if __name__ == "__main__":
     import uvicorn

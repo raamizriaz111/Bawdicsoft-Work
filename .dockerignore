@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+__pycache__
+*.pyc
+*.pyo
+.DS_Store
+data/leads.json
+data/sessions.json
+*.csv
+*.log
+cloudflared
