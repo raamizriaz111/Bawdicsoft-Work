@@ -179,6 +179,8 @@ class ChatClient:
     _BOT_IDENTITY_PHRASES = (
         "are you a bot", "are you ai", "are you real", "real person",
         "human or ai", "bot or human", "who am i talking", "who are you",
+        "what is your name", "what's your name", "whats your name",
+        "tell me your name", "may i know your name", "who is this",
     )
     _HUMAN_HANDOFF_PHRASES = (
         "talk to a human", "speak to a human", "real human", "real agent",
@@ -252,6 +254,59 @@ class ChatClient:
         )
 
     @staticmethod
+    def _build_company_contact_reply(biz_name: str, kb: str, tone: str = "") -> str:
+        """Provide official company contact details from the KB and strictly protect customer leads."""
+        import re
+
+        is_blunt = any(w in (tone or "").lower() for w in ("rude", "aggressive", "blunt", "abusive", "harsh", "impatient", "direct", "sarcastic"))
+        contact_items = []
+        for line in (kb or "").split("\n"):
+            clean = line.strip().lstrip("-*• ")
+            low = clean.lower()
+            if any(w in low for w in ("requirement", "viewing policy", "careers & job", "please email your cv", "open or upcoming")):
+                continue
+            if re.search(r"\b(?:company email|direct ceo email|email|whatsapp|direct phone|phone|front desk phone|headquarters address|address)\s*:", low):
+                contact_items.append(clean)
+
+        if not contact_items:
+            # Free-form / prose extraction
+            emails = list(dict.fromkeys(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", kb or "")))
+            emails = [e for e in emails if not e.endswith(("@example.com", "@domain.com", "name@gmail.com"))]
+
+            phones = list(dict.fromkeys(re.findall(r"(?:\+?\d{1,3}[\s\-]?)?(?:\(?\d{2,4}\)?[\s\-]?)?\d{3,4}[\s\-]?\d{3,4}", kb or "")))
+            valid_phones = []
+            for p in phones:
+                digits = re.sub(r"\D", "", p)
+                if len(digits) >= 8 and not re.match(r"^(?:19|20)\d{2}$", digits):
+                    valid_phones.append(p.strip())
+
+            address = None
+            m_head = re.search(r"(?:headquartered at|headquarters in|located at|office at)\s+([^.\n]+)", kb or "", re.IGNORECASE)
+            if m_head:
+                address = m_head.group(1).strip()
+            else:
+                m_bldg = re.search(r"([^.\n]*(?:building|suite|tower|plaza|road|street|dha|clifton)[^.\n]*)", kb or "", re.IGNORECASE)
+                if m_bldg:
+                    clean_addr = m_bldg.group(1).strip()
+                    clean_addr = re.sub(r"^(?:and\s+|at\s+)", "", clean_addr, flags=re.IGNORECASE).strip()
+                    if len(clean_addr) <= 80:
+                        address = clean_addr
+
+            if emails:
+                contact_items.append(f"Company Email: {emails[0]}")
+            if valid_phones:
+                contact_items.append(f"Phone: {valid_phones[0]}")
+            if address:
+                contact_items.append(f"Headquarters Address: {address}")
+
+        if contact_items:
+            details = " | ".join(contact_items)
+            if is_blunt:
+                return f"Contact {biz_name}: {details}."
+            return f"You can reach {biz_name} directly: {details}."
+        return f"You can reach our team at {biz_name} directly during business hours."
+
+    @staticmethod
     def _classify_behavior_heuristic(
         conversation_history: List[Dict[str, str]],
         user_profile: Optional[Dict[str, Any]] = None,
@@ -293,6 +348,8 @@ class ChatClient:
              ("book now", "sign me up", "count me in", "lets do it", "let's do it", "ready to start", "awesome", "perfect", "excited", "love to")),
             ("confused", "warm", "Simplified Two-Option Guide",
              ("confused", "not sure", "don't know", "dont know", "which one", "recommend", "help me choose", "what should i")),
+            ("excited", "warm", "Consultative Project Scoping",
+             ("want to build", "want to create", "want to launch", "want to start", "want to make", "want a website", "want an app", "want a store", "need a website", "need an app", "need a store", "need a chatbot", "looking to build", "looking to launch", "looking to start", "looking to create", "planning to build", "planning to launch", "shopify", "woocommerce", "ecommerce", "e-commerce", "online store", "online shop", "intersted", "interested in")),
             ("curious", "warm", "Consultative Discovery",
              ("price", "cost", "fee", "package", "service", "location", "address", "opening hours", "office hours", "business hours", "what hours", "timing", "timings", "portfolio", "appointment", "weekend", "?")),
         ]
@@ -329,10 +386,21 @@ class ChatClient:
                 return {"emotion": emotion, "buyer_intent": intent, "sales_tactic": tactic}
 
         has_contact = bool((user_profile or {}).get("email") or (user_profile or {}).get("phone"))
+        clean_ack = re.sub(r"[^a-z\s]", "", last_msg).strip()
+        greetings = ("hi", "hello", "hey", "hiya", "howdy", "good morning", "good afternoon", "good evening", "salam", "assalam", "yo")
+        is_greeting = any(clean_ack == g or clean_ack.startswith(g + " ") for g in greetings)
+
+        if is_greeting:
+            return {
+                "emotion": "neutral",
+                "buyer_intent": "warm" if has_contact else "cold",
+                "sales_tactic": "Warm Hospitality",
+            }
+
         return {
-            "emotion": "neutral",
+            "emotion": "curious",
             "buyer_intent": "warm" if has_contact else "cold",
-            "sales_tactic": "Warm Hospitality" if len(last_msg) <= 25 else "Friendly Qualification",
+            "sales_tactic": "Consultative Discovery",
         }
 
     @staticmethod
@@ -385,7 +453,7 @@ class ChatClient:
             sales_stage = "objection_handling"
         elif behavior["emotion"] == "confused":
             sales_stage = "recommendation"
-        elif len(low) <= 18 and intent == "cold":
+        elif behavior.get("sales_tactic") == "Warm Hospitality":
             sales_stage = "greeting"
         else:
             sales_stage = "discovery"
@@ -560,63 +628,71 @@ class ChatClient:
                 self.model_name,
                 "gemini-3.5-flash-lite",
                 "gemini-3.1-flash-lite",
+                "gemini-3.8-flash",
             ]
             unique_models = []
             for m in models_to_try:
                 if m and m not in unique_models:
                     unique_models.append(m)
 
-            # Enforce a hard 18.0s total failover budget so visitors never stall indefinitely
-            deadline = time.monotonic() + 18.0
-            for model_to_call in unique_models[:2]:
-                remaining = deadline - time.monotonic()
-                if remaining < 1.5:
-                    break
-                executor = None
-                per_model_cap = 9.0 if "3.5" in model_to_call else 10.0
-                model_timeout = round(min(per_model_cap, remaining), 2)
-                try:
-                    def _call_model():
-                        cfg_kwargs = {
-                            "system_instruction": system_instruction,
-                            "temperature": 0.45,
-                            "max_output_tokens": 620,
-                            "response_mime_type": "application/json",
-                            "response_schema": analysis_schema,
-                        }
-                        if "3.1" in model_to_call:
-                            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-                        return self.client.models.generate_content(
-                            model=model_to_call,
-                            contents=contents,
-                            config=types.GenerateContentConfig(**cfg_kwargs)
-                        )
+            # Enforce a hard 20.0s total failover budget so visitors never stall indefinitely
+            deadline = time.monotonic() + 20.0
+            for model_to_call in unique_models[:3]:
+                for attempt in range(2):
+                    remaining = deadline - time.monotonic()
+                    if remaining < 1.5:
+                        break
+                    executor = None
+                    model_timeout = round(min(10.0, remaining), 2)
+                    try:
+                        def _call_model():
+                            cfg_kwargs = {
+                                "system_instruction": system_instruction,
+                                "temperature": 0.45,
+                                "max_output_tokens": 620,
+                                "response_mime_type": "application/json",
+                                "response_schema": analysis_schema,
+                            }
+                            if "3.1" in model_to_call or "3.8" in model_to_call:
+                                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+                            return self.client.models.generate_content(
+                                model=model_to_call,
+                                contents=contents,
+                                config=types.GenerateContentConfig(**cfg_kwargs)
+                            )
 
-                    # Avoid `with ThreadPoolExecutor`: __exit__ blocks on shutdown(wait=True) if HTTP stalls.
-                    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                    future = executor.submit(_call_model)
-                    response = future.result(timeout=model_timeout)
-                    executor.shutdown(wait=False)
-                    parsed_result = self._parse_analysis_response(response, fallback_behavior)
-                    if parsed_result:
-                        parsed_result = self._enforce_contact_integrity(
-                            parsed_result,
-                            last_user_raw=last_user_raw,
-                            user_profile=user_profile,
-                            config=config,
-                        )
-                        parsed_result["source"] = model_to_call
-                        return parsed_result
-                except concurrent.futures.TimeoutError:
-                    if executor is not None:
-                        executor.shutdown(wait=False, cancel_futures=True)
-                    print(f"[ChatClient] Model {model_to_call} timed out after {model_timeout}s. Fast-switching to next model...")
-                    continue
-                except Exception as e:
-                    if executor is not None:
-                        executor.shutdown(wait=False, cancel_futures=True)
-                    print(f"[ChatClient] Model {model_to_call} error: {e}. Fast-switching to next model...")
-                    continue
+                        # Avoid `with ThreadPoolExecutor`: __exit__ blocks on shutdown(wait=True) if HTTP stalls.
+                        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                        future = executor.submit(_call_model)
+                        response = future.result(timeout=model_timeout)
+                        executor.shutdown(wait=False)
+                        parsed_result = self._parse_analysis_response(response, fallback_behavior)
+                        if parsed_result:
+                            parsed_result = self._enforce_contact_integrity(
+                                parsed_result,
+                                last_user_raw=last_user_raw,
+                                user_profile=user_profile,
+                                config=config,
+                            )
+                            parsed_result["source"] = model_to_call
+                            return parsed_result
+                        break
+                    except concurrent.futures.TimeoutError:
+                        if executor is not None:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        print(f"[ChatClient] Model {model_to_call} timed out after {model_timeout}s. Fast-switching to next model...")
+                        break
+                    except Exception as e:
+                        if executor is not None:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        err_str = str(e).lower()
+                        is_transient = any(tok in err_str for tok in ("503", "unavailable", "overloaded", "429", "resource_exhausted", "500", "internal"))
+                        if attempt == 0 and is_transient and (deadline - time.monotonic()) >= 3.5:
+                            print(f"[ChatClient] Model {model_to_call} transient error ({e}). Quick retry...")
+                            time.sleep(0.35)
+                            continue
+                        print(f"[ChatClient] Model {model_to_call} error: {e}. Fast-switching to next model...")
+                        break
 
         # Smart fallback responder for testing or when offline
         return {
@@ -713,11 +789,33 @@ class ChatClient:
         if parsed.get("sales_stage") == "post_capture":
             parsed["sales_stage"] = "closing"
         parsed["lead_score"] = min(int(parsed.get("lead_score") or 55), 70)
+
+        # Privacy guard: if user asked for company contact, ensure reply never leaks visitor's stored lead data
+        company_contact_phrases = (
+            "contact detail", "contact details", "contact info", "contact information",
+            "your contact", "how to contact", "how can i contact", "how do i contact",
+            "who can i contact", "where can i contact", "company email", "your email",
+            "official email", "support email", "phone number", "phone no", "mobile number",
+            "whatsapp number", "call you", "reach you", "reach out", "how to reach",
+            "contact number", "contact us", "contact you",
+        )
+        msg_low = (last_user_raw or "").lower()
+        if any(p in msg_low for p in company_contact_phrases):
+            is_asking_own = any(k in msg_low for k in ("my name", "my email", "my phone", "my contact", "what is my", "whats my", "do you know my"))
+            if not is_asking_own:
+                user_email = profile.get("email")
+                user_phone = profile.get("phone")
+                rep = parsed.get("reply") or ""
+                if (user_email and user_email.lower() in rep.lower()) or (user_phone and user_phone in rep):
+                    biz_name = (config or {}).get("businessName") or COMPANY_OR_SOFTWARE_NAME
+                    kb = (config or {}).get("knowledgeBase") or ""
+                    parsed["reply"] = cls._build_company_contact_reply(biz_name, kb, (config or {}).get("tone") or "")
+
         return parsed
 
     @staticmethod
     def _format_kb_prose(lines: List[str]) -> str:
-        """Convert raw KB bullet lines into clean, conversational sentences."""
+        """Convert raw KB bullet lines or sentences into clean, conversational prose."""
         cleaned = []
         for raw in lines:
             s = re.sub(r"^\s*[-*•#]+\s*", "", raw or "").strip()
@@ -728,73 +826,237 @@ class ChatClient:
                 tail = tail.strip()
                 if tail and len(head.strip()) <= 36:
                     s = f"{head.strip()} — {tail}"
-            if s and s[-1] not in ".!?":
+            clean_end = s.rstrip('”"\'’)')
+            if clean_end and clean_end[-1] not in ".!?":
                 s += "."
             cleaned.append(s)
         return " ".join(cleaned)
 
     @staticmethod
+    def _split_into_sentences(text: str) -> List[str]:
+        """Split prose text into clean natural sentences protecting decimals, quotes, and abbreviations."""
+        if not text:
+            return []
+        masked = re.sub(r"(\d+)\.(\d+)", r"\1__DEC__\2", text)
+        for abbr in ("Dr.", "Mr.", "Ms.", "Prof.", "Inc.", "Ltd.", "vs.", "e.g.", "i.e.", "approx."):
+            masked = masked.replace(abbr, abbr.replace(".", "__DOT__"))
+        def _mask_inner_quote_dots(m):
+            content = m.group(0)
+            inner = content[1:-2]
+            tail = content[-2:]
+            return content[0] + inner.replace(".", "__QDOT__") + tail
+        masked = re.sub(r"[“\"][^”\"]+[”\"]", _mask_inner_quote_dots, masked)
+        marked = re.sub(r'([.!?][”"’\']?)\s+([A-Z0-9“"‘\'])', r'\1__SPLIT__\2', masked)
+        raw_sents = marked.split('__SPLIT__')
+        parts = []
+        for s in raw_sents:
+            clean = s.replace("__DEC__", ".").replace("__DOT__", ".").replace("__QDOT__", ".").strip()
+            if clean:
+                parts.append(clean)
+        return parts
+
+    @classmethod
+    def _parse_kb_units(cls, kb: str) -> List[Dict[str, Any]]:
+        """Parse any KB into structured units with section context, sentence boundaries, and heading flags."""
+        if not kb or not kb.strip():
+            return []
+        lines = kb.splitlines()
+        units: List[Dict[str, Any]] = []
+        current_section = "General"
+
+        heading_keywords = {
+            "about", "overview", "services", "capabilities", "specialties", "products",
+            "portfolio", "case studies", "projects", "track record", "clients",
+            "pricing", "plans", "packages", "cost", "fees", "contact", "location",
+            "hours", "team", "mission", "values", "faq", "holovox"
+        }
+
+        def _is_heading(s: str) -> bool:
+            s = s.strip()
+            if not s:
+                return False
+            if re.match(r"^#{1,6}\s+", s):
+                return True
+            if re.match(r"^\d+\.\s+[A-Za-z0-9\s&/,\-–—]+:?$", s):
+                return True
+            if s.endswith(":") and len(s) <= 60 and not s.lower().startswith(("http://", "https://")):
+                return True
+            if len(s) <= 50 and s[-1] not in ".!?;,":
+                low = s.lower()
+                if s.isupper() or s.istitle() or any(hw in low for hw in heading_keywords):
+                    return True
+            return False
+
+        def _clean_heading(s: str) -> str:
+            s = re.sub(r"^#{1,6}\s+", "", s).strip()
+            s = re.sub(r"^\d+\.\s+", "", s).strip()
+            s = s.rstrip(":")
+            return s.strip()
+
+        for raw in lines:
+            raw_strip = raw.strip()
+            if not raw_strip:
+                continue
+            if _is_heading(raw_strip):
+                current_section = _clean_heading(raw_strip)
+                continue
+
+            is_bullet = bool(re.match(r"^\s*[-*•]\s+|\s*\d+\.\s+", raw_strip))
+            if is_bullet:
+                clean_b = re.sub(r"^\s*[-*•]\s+|\s*\d+\.\s+", "", raw_strip).strip()
+                if clean_b:
+                    units.append({
+                        "section": current_section,
+                        "text": clean_b,
+                        "is_heading": False,
+                        "tokens": set(re.findall(r"[a-z0-9]{2,}", clean_b.lower()))
+                    })
+            else:
+                sents = cls._split_into_sentences(raw_strip)
+                for sent in sents:
+                    if len(sent) >= 5:
+                        units.append({
+                            "section": current_section,
+                            "text": sent,
+                            "is_heading": False,
+                            "tokens": set(re.findall(r"[a-z0-9]{2,}", sent.lower()))
+                        })
+        return units
+
+    @classmethod
+    def _extract_kb_section(cls, kb: str, section_keywords: tuple, limit: int = 5) -> List[str]:
+        """Collect content units under matching KB section headings (e.g. Services, Portfolio, Pricing)."""
+        if not kb:
+            return []
+        units = cls._parse_kb_units(kb)
+        collected = []
+        for u in units:
+            sec_low = u["section"].lower()
+            if any(kw in sec_low for kw in section_keywords):
+                collected.append(u["text"])
+                if len(collected) >= limit:
+                    break
+        return collected
+
+    @classmethod
     def _search_kb_lines(
+        cls,
         kb: str,
         keywords: List[str],
         limit: int = 2,
         whole_word: bool = False,
     ) -> List[str]:
-        """Return the highest-overlap KB detail lines, prioritizing topic-heading matches."""
-        import re
-
+        """Return the highest-relevance KB sentences or bullets, strictly excluding raw headings."""
         if not kb or not keywords:
             return []
+        units = cls._parse_kb_units(kb)
+        if not units:
+            return []
 
-        def _count_hits(text: str) -> int:
-            if whole_word:
-                return sum(1 for kw in keywords if re.search(r"\b" + re.escape(kw) + r"\b", text))
-            return sum(1 for kw in keywords if kw in text)
+        stop_words = {
+            "am", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it",
+            "of", "on", "or", "that", "the", "this", "to", "with", "what", "how", "who", "where",
+            "do", "does", "can", "tell", "me", "about"
+        }
+        clean_kws = [kw.lower() for kw in keywords if kw.lower() not in stop_words and len(kw) >= 2]
+        if not clean_kws:
+            clean_kws = [kw.lower() for kw in keywords]
 
         scored = []
-        for raw_line in kb.splitlines():
-            line = raw_line.strip()
-            if len(line) < 6 or line.endswith(":"):
-                continue
-            low = line.lower()
-            hits = _count_hits(low)
-            if hits > 0:
-                head_bonus = 0
-                if ":" in low and not low.startswith(("http://", "https://")):
-                    head = low.split(":", 1)[0]
-                    head_bonus = _count_hits(head) * 4
-                # Prefer concrete bullet/detail lines over section headings and reward title matches
-                bonus = 0 if line.endswith(":") else 1
-                scored.append((hits * 2 + bonus + head_bonus, line))
+        for u in units:
+            text_low = u["text"].lower()
+            sec_low = u["section"].lower()
+            score = 0
+            for kw in clean_kws:
+                if whole_word:
+                    pat = r"\b" + re.escape(kw) + r"\b"
+                    hit_text = bool(re.search(pat, text_low))
+                    hit_sec = bool(re.search(pat, sec_low))
+                else:
+                    hit_text = kw in text_low
+                    hit_sec = kw in sec_low
+
+                # Phonetic & typo variations (e.g. w <-> v, or stripped hyphens)
+                if not hit_text and not hit_sec and len(kw) >= 4:
+                    variants = [
+                        kw.replace("w", "v"),
+                        kw.replace("v", "w"),
+                        kw.replace("-", ""),
+                        kw.replace(" ", "")
+                    ]
+                    for var in variants:
+                        if var != kw:
+                            if whole_word:
+                                vpat = r"\b" + re.escape(var) + r"\b"
+                                if re.search(vpat, text_low):
+                                    hit_text = True
+                                    break
+                                if re.search(vpat, sec_low):
+                                    hit_sec = True
+                                    break
+                            else:
+                                if var in text_low:
+                                    hit_text = True
+                                    break
+                                if var in sec_low:
+                                    hit_sec = True
+                                    break
+
+                # Fuzzy similarity for longer tokens (len >= 5)
+                if not hit_text and not hit_sec and len(kw) >= 5:
+                    import difflib
+                    for word in u["tokens"]:
+                        if abs(len(word) - len(kw)) <= 2:
+                            if difflib.SequenceMatcher(None, kw, word).ratio() >= 0.82:
+                                hit_text = True
+                                break
+                    if not hit_sec:
+                        for sec_word in re.findall(r"[a-z0-9]{3,}", sec_low):
+                            if abs(len(sec_word) - len(kw)) <= 2:
+                                if difflib.SequenceMatcher(None, kw, sec_word).ratio() >= 0.82:
+                                    hit_sec = True
+                                    break
+
+                if hit_text:
+                    score += 3
+                    if ":" in text_low and kw in text_low.split(":", 1)[0]:
+                        score += 4
+                    # Canonical definition bonus: "X is..." or "X are..." or starts with keyword
+                    if (
+                        text_low.startswith(f"{kw} is")
+                        or text_low.startswith(f"{kw} are")
+                        or any(text_low.startswith(f"{var} is") for var in (kw.replace("w", "v"), kw.replace("v", "w")))
+                    ):
+                        score += 8
+                    elif text_low.startswith(kw) or any(text_low.startswith(f"{w} {kw}") for w in ("in", "for", "our", "the", "it is", "among")):
+                        score += 4
+                if hit_sec:
+                    score += 4
+
+            # Boost relevant units when specific intents are queried
+            if any(k in clean_kws for k in ("price", "cost", "pricing", "$", "pkr", "rate", "fee")) and any(m in text_low for m in ("$", "pkr", "rs", "usd", "starting at", "starting from")):
+                score += 6
+            if any(k in clean_kws for k in ("address", "located", "location", "office", "headquarters", "where")) and any(m in text_low for m in ("headquartered", "suite", "building", "road", "street", "clifton", "dha", "karachi")):
+                score += 5
+            if any(k in clean_kws for k in ("ceo", "director", "founder", "leads", "who")) and any(m in text_low for m in ("ceo", "director", "founder", "syed bilal hashmi")):
+                score += 6
+            if any(k in clean_kws for k in ("motto", "values", "mission")) and "motto" in text_low:
+                score += 6
+            if any(k in clean_kws for k in ("sla", "uptime", "support", "coverage")) and any(m in text_low for m in ("sla", "uptime", "24/7", "iso 27001")):
+                score += 6
+            if any(k in clean_kws for k in ("clients", "customers")) and any(m in text_low for m in ("clients are", "among its clients", "worked with")):
+                score += 6
+
+            if score > 0:
+                scored.append((score, u["text"]))
+
         scored.sort(key=lambda item: item[0], reverse=True)
         if not scored:
             return []
         best_score = scored[0][0]
         if best_score >= 6:
-            # Drop incidental background mentions when a topic heading matched directly
-            scored = [item for item in scored if item[0] >= best_score - 1]
-        return [line for _, line in scored[:limit]]
-
-    @staticmethod
-    def _extract_kb_section(kb: str, section_keywords: tuple, limit: int = 3) -> List[str]:
-        """Collect bullet lines under matching KB section headings (e.g., SERVICES or PORTFOLIO)."""
-        if not kb:
-            return []
-        collected: List[str] = []
-        in_section = False
-        for raw_line in kb.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            low = line.lower()
-            if line.endswith(":") and (line[0].isdigit() or line.isupper() or ":" in line):
-                in_section = any(kw in low for kw in section_keywords)
-                continue
-            if in_section:
-                collected.append(line)
-                if len(collected) >= limit:
-                    break
-        return collected
+            scored = [item for item in scored if item[0] >= best_score - 2]
+        return [text for _, text in scored[:limit]]
 
     def _smart_mock_response(
         self,
@@ -884,14 +1146,20 @@ class ChatClient:
                 return f"Noted{greeting_name}—we already have {contact_label} and {biz_name} is ready whenever you are."
             return f"Reach back out to {biz_name} whenever you're ready{greeting_name}, or drop your email/phone now to lock in your spot."
 
-        # 5. Greeting (works on any turn, not only empty history)
+        # 5. Pure greeting (do not hijack greetings followed by a real question like "Hi, what services...")
         clean_ack = re.sub(r"[^a-z\s]", "", last_user_msg).strip()
-        if clean_ack in self._GREETING_EXACT or clean_ack.startswith(("hi ", "hello ", "hey ", "good morning", "good afternoon", "good evening", "how are you")):
+        is_pure_greeting = clean_ack in self._GREETING_EXACT or (
+            clean_ack.startswith(("hi ", "hello ", "hey ", "good morning", "good afternoon", "good evening", "how are you"))
+            and "?" not in last_user_msg
+            and len(clean_ack.split()) <= 5
+            and not any(w in clean_ack for w in ("what", "how", "where", "when", "price", "cost", "service", "book", "job", "hiring"))
+        )
+        if is_pure_greeting:
             if is_blunt:
                 return f"{agent_name} at {biz_name} here. Tell me what you need so we can {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}."
             if is_energetic:
-                return f"Hey{greeting_name}! {agent_name} from {biz_name} here—let's get you set up to {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}!"
-            return f"Hello{greeting_name}! I'm {agent_name} at {biz_name}. Let me know what you're looking for so we can {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}."
+                return f"Hey{greeting_name}! {agent_name} from {biz_name} here — what can we help you accomplish today?"
+            return f"Hello{greeting_name}! I'm {agent_name} at {biz_name}. How can I help you today?"
 
         # 6. Farewell
         if any(w in last_user_msg for w in ["bye", "goodbye", "see you", "cya", "have to go"]):
@@ -915,13 +1183,13 @@ class ChatClient:
             "business hours", "what hours", "hours", "weekday", "weekdays", "weekend",
             "saturday", "sunday", "are you open", "when do you open", "open today",
         )
-        address_phrases = ("location", "address", "where are you", "where is your", "located")
+        address_phrases = ("location", "address", "where are you", "where is your", "located", "headquarters", "head office")
         wants_hours = any(w in last_user_msg for w in hours_phrases)
         wants_address = any(w in last_user_msg for w in address_phrases)
         if wants_hours or wants_address:
             loc_keywords: List[str] = []
             if wants_address:
-                loc_keywords.extend(["address", "headquarters address", "headquarters", "head office", "located", "location"])
+                loc_keywords.extend(["address", "headquarters address", "headquarters", "headquartered", "head office", "located", "location", "building", "suite", "road", "street", "karachi"])
             if wants_hours:
                 loc_keywords.extend(["working hours", "office hours", "hours", "hour", "mon", "tue", "fri", "sat", "sun", "weekday", "weekend"])
             matches = self._search_kb_lines(kb, loc_keywords, limit=2 if (wants_hours and wants_address) else 1)
@@ -929,10 +1197,49 @@ class ChatClient:
                 matches = self._search_kb_lines(kb, ["suite", "building", "road", "phase", "clifton", "dha", "karachi"], limit=1)
             if matches:
                 prose = self._format_kb_prose(matches)
-                suffix = "" if behavior["emotion"] == "frustrated" else goal_hook()
+                suffix = goal_hook() if is_blunt else ""
                 return f"{prose}{suffix}"
-            suffix = "" if behavior["emotion"] == "frustrated" else goal_hook()
+            suffix = goal_hook() if is_blunt else ""
             return f"{biz_name} operates during listed business hours; check with us to confirm exact availability.{suffix}"
+
+        # 6. Company Contact Information (Official channels from KB) vs Customer Lead Privacy
+        company_contact_phrases = (
+            "contact detail", "contact details", "contact info", "contact information",
+            "your contact", "how to contact", "how can i contact", "how do i contact",
+            "who can i contact", "where can i contact", "company email", "your email",
+            "official email", "support email", "phone number", "phone no", "mobile number",
+            "whatsapp number", "call you", "reach you", "reach out", "how to reach",
+            "contact number", "contact us", "contact you",
+        )
+        is_asking_company_contact = any(p in last_user_msg for p in company_contact_phrases) and not newly_shared_contact
+        is_asking_own_info = not newly_shared_contact and (
+            any(k in last_user_msg for k in (
+                "what is my", "whats my", "what's my", "do you know my", "do you have my",
+                "on file for me", "what email do you have", "what phone do you have",
+                "what number do you have", "what details do you have", "what info do you have",
+                "what do you have for me", "who am i", "which email do you have"
+            )) or (
+                any(k in last_user_msg for k in ("my email?", "my phone?", "my name?", "my number?", "my contact?"))
+            ) or (
+                ("?" in last_user_msg) and any(k in last_user_msg for k in ("for me", "about me", "my email", "my phone", "my name")) and not any(v in last_user_msg for v in ("build", "create", "launch", "make", "recommend", "quote", "cost", "price"))
+            )
+        )
+        if is_asking_company_contact and not is_asking_own_info:
+            return self._build_company_contact_reply(biz_name, kb, tone)
+        if is_asking_own_info:
+            if has_known_contact or user_name:
+                if "email" in last_user_msg and user_email and not ("phone" in last_user_msg or "name" in last_user_msg):
+                    return f"We have {user_email} on file as your email{greeting_name}."
+                if ("name" in last_user_msg or "who am i" in last_user_msg) and user_name and not ("email" in last_user_msg or "phone" in last_user_msg):
+                    return f"We have your name saved as {user_name}{greeting_name}."
+                if ("phone" in last_user_msg or "number" in last_user_msg) and user_phone and not "email" in last_user_msg:
+                    return f"We have {user_phone} on file as your phone number{greeting_name}."
+                parts = []
+                if user_name: parts.append(f"name: {user_name}")
+                if user_email: parts.append(f"email: {user_email}")
+                if user_phone: parts.append(f"phone: {user_phone}")
+                return f"We have your {', '.join(parts)} on file{greeting_name}."
+            return f"I don't have your contact details saved yet{greeting_name}."
 
         # 6. Skeptical / Trust / Proof inquiries
         if behavior["emotion"] == "skeptical":
@@ -967,7 +1274,7 @@ class ChatClient:
         if mentioned_missing_city:
             loc_matches = self._search_kb_lines(kb, ["address", "located", "dha", "clifton", "karachi", "office", "exclusively"])
             loc_note = f" Our confirmed service coverage is {self._format_kb_prose(loc_matches[:1])}" if loc_matches else ""
-            return f"We do not have listings or services confirmed in {mentioned_missing_city.title()} in our knowledge base.{loc_note}"
+            return f"We do not have listings or services confirmed in {mentioned_missing_city.title()}.{loc_note}"
 
         stop_words = {
             "am", "an", "and", "any", "are", "as", "at", "be", "before", "built", "by",
@@ -981,50 +1288,187 @@ class ChatClient:
             "us", "very", "want", "we", "what", "when", "where", "which", "who", "why",
             "will", "with", "work", "would", "yahoo", "yes", "you", "your", "about",
             "interested", "anymore", "been", "good",
+            "next", "step", "steps", "after", "then", "way", "start", "begin",
+            "phase", "part", "process", "roadmap", "road", "map", "today", "here", "there",
         }
         if newly_shared_contact and "?" not in last_user_msg:
             return f"Saved your contact info{greeting_name}. Our team at {biz_name} will follow up regarding your inquiry."
         user_turns = sum(1 for m in (history or []) if m.get("role") == "user")
         wants_booking = any(
             w in last_user_msg
-            for w in ("book", "appointment", "viewing", "schedule", "demo", "trial", "consultation", "contact", "call", "quote")
+            for w in ("book", "appointment", "viewing", "schedule", "demo", "trial", "consultation", "call me")
         )
 
         def _finish_kb_reply(prose_text: str) -> str:
             if behavior["emotion"] == "frustrated" or has_known_contact:
                 return prose_text
-            if user_turns <= 1 and not is_blunt and not wants_booking and behavior["emotion"] not in ("urgent", "excited"):
+            if wants_booking or behavior["emotion"] in ("urgent", "excited") or behavior["buyer_intent"] in ("hot", "urgent") or is_blunt:
+                return f"{prose_text}{goal_hook()}"
+            if user_turns <= 1:
                 return f"{prose_text} Are you exploring a specific project or use case here?"
-            return f"{prose_text}{goal_hook()}"
+            return f"{prose_text} Let me know if you would like more details or have any questions about this!"
 
         # Check explicit unconfirmed policy terms absent from KB (e.g., NDA, refunds, SLA)
         for policy_kw in ("nda", "non-disclosure", "refund", "money-back", "warranty", "sla"):
             kw_pat = r"\b" + re.escape(policy_kw) + r"\b"
             if re.search(kw_pat, last_user_msg) and not re.search(kw_pat, kb.lower()):
                 return (
-                    f"Our knowledge base doesn't specify our {policy_kw.upper() if len(policy_kw) <= 3 else policy_kw} policy directly — "
+                    f"I don't have our exact {policy_kw.upper() if len(policy_kw) <= 3 else policy_kw} terms handy right here — "
                     f"our team at {biz_name} can confirm that with you on a quick call.{'' if (has_known_contact or behavior['emotion'] == 'frustrated') else goal_hook()}"
                 )
 
+        # Educational roadmap requests & context-aware "next step" follow-ups (checked early before token search)
+        guidance_reply = self._build_contextual_guidance_reply(
+            last_user_msg=last_user_msg,
+            history=history,
+            biz_name=biz_name,
+            greeting_name=greeting_name,
+            is_blunt=is_blunt,
+            behavior=behavior,
+        )
+        if guidance_reply:
+            return guidance_reply
+
+        # Check previous bot message in conversation history
+        prev_bot_text = ""
+        for m in reversed(history[:-1] if len(history) > 1 else []):
+            if m.get("role") == "assistant" and m.get("content"):
+                prev_bot_text = m["content"].lower()
+                break
+
+        # Continuation & detail requests ("details of these", "give details", "explain more", "details?")
+        clean_follow = re.sub(r"[^a-z\s]", "", last_user_msg).strip()
+        is_detail_req = bool(
+            re.search(r"\b(?:details?|detail|explain|elaborate|breakdown|break down|tell me more|more info|information on|deep details)\b", last_user_msg)
+            or clean_follow in {"more", "details", "what else", "anything else", "go on", "continue", "aur", "aur batao"}
+        )
+
+        prev_offered_services = any(w in prev_bot_text for w in ("core capabilities", "capabilities include", "services include", "our services", "software services", "deep details on any of these"))
+        prev_offered_portfolio = any(w in prev_bot_text for w in ("featured portfolio", "portfolio projects", "past projects"))
+
+        if is_detail_req:
+            # Check if user specified a particular domain in their detail request
+            if re.search(r"\b(?:ai|artificial intelligence|machine learning|ml|nlp|chatbots?)\b", last_user_msg):
+                ai_lines = self._search_kb_lines(kb, ["ai", "chatbots", "machine learning", "nlp"], limit=2)
+                if ai_lines:
+                    return _finish_kb_reply(self._format_kb_prose(ai_lines))
+            if re.search(r"\b(?:blockchain|web3|smart contracts?|crypto|defi|tokens?|wallets?)\b", last_user_msg):
+                bc_lines = self._search_kb_lines(kb, ["blockchain", "smart contracts", "web3"], limit=2)
+                if bc_lines:
+                    return _finish_kb_reply(self._format_kb_prose(bc_lines))
+            if re.search(r"\b(?:web|web development|crm|saas|e-commerce|ecommerce|dashboards?)\b", last_user_msg):
+                web_lines = self._search_kb_lines(kb, ["web development", "crm", "saas", "e-commerce"], limit=2)
+                if web_lines:
+                    return _finish_kb_reply(self._format_kb_prose(web_lines))
+            if re.search(r"\b(?:holovox|holowox|call coaching|holo glasses|glasses|coaching)\b", last_user_msg):
+                holo_lines = self._search_kb_lines(kb, ["holovox", "coaching", "glasses"], limit=2)
+                if holo_lines:
+                    return _finish_kb_reply(self._format_kb_prose(holo_lines))
+
+            # General detail request following an overview (e.g. "Details of these", "details on all of them", "explain more")
+            if prev_offered_services or re.search(r"\b(?:services?|capabilities|these|all of these|all of them|all|both|each)\b", last_user_msg):
+                svc_lines = self._extract_kb_section(kb, ("service", "capabilit", "specialt", "program", "product"), limit=6)
+                if svc_lines:
+                    return _finish_kb_reply(self._format_kb_prose(svc_lines))
+
+            if prev_offered_portfolio or re.search(r"\b(?:portfolio|projects?|case stud)\b", last_user_msg):
+                port_lines = self._extract_kb_section(kb, ("portfolio", "case stud", "featured project", "past project"), limit=8)
+                if port_lines:
+                    return _finish_kb_reply(self._format_kb_prose(port_lines))
+
+            candidate_lines = (
+                self._extract_kb_section(kb, ("service", "capabilit", "specialt", "program", "product"), limit=6)
+                + self._extract_kb_section(kb, ("portfolio", "case stud", "track record", "featured"), limit=4)
+                + self._extract_kb_section(kb, ("pric", "fee", "engagement", "plan", "package"), limit=3)
+            )
+            fresh_lines = []
+            for ln in candidate_lines:
+                head = ln.split(":", 1)[0].strip().lstrip("-*• ").lower() if ":" in ln else ln[:28].lower()
+                if head and head not in prev_bot_text:
+                    fresh_lines.append(ln)
+                if len(fresh_lines) >= 2:
+                    break
+            if fresh_lines:
+                return _finish_kb_reply(self._format_kb_prose(fresh_lines))
+            return (
+                f"At {biz_name}, I can share specifics on our services, past projects, or engagement pricing — "
+                f"which would be most useful for you next?"
+            )
+
         # Broad Services / Portfolio section summaries
         if re.search(r"\b(?:services?|capabilities|what do you do|what can you build|offerings?)\b", last_user_msg):
-            svc_lines = self._extract_kb_section(kb, ("service", "capabilit", "specialt", "program", "product"), limit=3)
+            svc_lines = self._extract_kb_section(kb, ("service", "capabilit", "specialt", "program", "product"), limit=6)
             if svc_lines:
-                return _finish_kb_reply(self._format_kb_prose(svc_lines))
+                if is_detail_req:
+                    return _finish_kb_reply(self._format_kb_prose(svc_lines))
+                heads = [ln.split(":", 1)[0].strip().lstrip("-*• ") for ln in svc_lines if ":" in ln and len(ln.split(":", 1)[0]) <= 36]
+                if heads:
+                    head_summary = ", ".join(heads[:3])
+                    return f"At {biz_name}, our core capabilities include {head_summary}. If you'd like deep details on any of these, let me know which area you're exploring!"
+                lead_phrases = []
+                for item in svc_lines:
+                    m = re.match(r"^(?:in\s+)?([A-Za-z0-9\s&/\-]+?)(?:,|\s+—|\s+-|\s+bawdicsoft|\s+we|\s+it\s+delivers|\s+builds)", item, re.IGNORECASE)
+                    if m and len(m.group(1).strip()) <= 30:
+                        lead_phrases.append(m.group(1).strip().title())
+                    elif len(item) <= 40:
+                        lead_phrases.append(item.strip().rstrip("."))
+                has_holovox = "holovox" in kb.lower()
+                product_note = " and our flagship AI call coaching product HOLOVOX" if has_holovox and "holovox" not in "".join(lead_phrases).lower() else ""
+                if lead_phrases:
+                    unique_leads = list(dict.fromkeys(lead_phrases))[:3]
+                    return f"At {biz_name}, our core capabilities include {', '.join(unique_leads)}{product_note}. If you'd like deep details on any of these, let me know which area you're exploring!"
+                return _finish_kb_reply(self._format_kb_prose(svc_lines[:2]))
 
-        if re.search(r"\b(?:portfolio|past work|past projects?|projects? have you|case stud(?:y|ies)|track record)\b", last_user_msg):
-            port_lines = self._extract_kb_section(kb, ("portfolio", "case stud", "track record", "featured"), limit=3)
+        is_portfolio_req = (
+            re.search(r"\b(?:portfolio|past work|case stud(?:y|ies)|featured projects?)\b", last_user_msg)
+            or bool(re.search(r"\b(?:projects? (?:have you|did you) (?:built|done|created|developed|worked on))\b", last_user_msg))
+            or ("project" in last_user_msg and any(w in last_user_msg for w in ("show", "list", "see", "samples", "examples", "portfolio", "what projects")))
+        ) and not any(m in last_user_msg for m in ("how many", "number of", "count"))
+        if is_portfolio_req:
+            port_lines = self._extract_kb_section(kb, ("portfolio", "case stud", "featured project", "past project"), limit=8)
             if port_lines:
-                return _finish_kb_reply(self._format_kb_prose(port_lines))
+                if is_detail_req:
+                    return _finish_kb_reply(self._format_kb_prose(port_lines))
+                featured_projects = []
+                for item in port_lines:
+                    m = re.match(r"^([A-Z0-9\-\s]{3,24}|[A-Z][a-zA-Z0-9\-]+(?:\s+[A-Za-z0-9\-]+){0,2})\s+(?:is|—|-|offers|provides|tracks|delivers)", item)
+                    if m:
+                        pname = m.group(1).strip()
+                        if pname.lower() not in ("bawdicsoft", "we", "it", "our", "the", "the company"):
+                            featured_projects.append(pname)
+                if featured_projects:
+                    unique_p = list(dict.fromkeys(featured_projects))[:4]
+                    return f"Our featured portfolio projects at {biz_name} include {', '.join(unique_p)}. Would you like deep technical details on any of these?"
+                return _finish_kb_reply(self._format_kb_prose(port_lines[:2]))
 
         sanitized_msg = re.sub(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", " ", last_user_msg)
         query_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", sanitized_msg) if t not in stop_words]
         kb_hits = self._search_kb_lines(kb, query_tokens, limit=2, whole_word=True)
+
+        # Consultative project / product goal scoping (e.g. "i want to build a shopify store")
+        if not wants_booking:
+            project_scoping = self._build_project_scoping_reply(
+                last_user_msg=last_user_msg,
+                kb=kb,
+                biz_name=biz_name,
+                greeting_name=greeting_name,
+                user_profile=user_profile,
+                user_turns=user_turns,
+                has_known_contact=has_known_contact,
+                is_blunt=is_blunt,
+                is_formal=is_formal,
+                goal_hook=goal_hook,
+                behavior=behavior,
+                has_direct_kb_hit=bool(kb_hits),
+            )
+            if project_scoping:
+                return project_scoping
+
         if kb_hits:
             return _finish_kb_reply(self._format_kb_prose(kb_hits))
 
-        # 9. Booking / Trial / Viewing / Contact -> Lead Capture (never re-ask contact if known)
-        if not newly_shared_contact and any(w in last_user_msg for w in ["book", "appointment", "viewing", "schedule", "demo", "trial", "visit", "consultation", "contact"]):
+        # 9. Booking / Appointment / Demo -> Lead Capture (never re-ask contact if known)
+        if not newly_shared_contact and any(w in last_user_msg for w in ["book", "appointment", "viewing", "schedule", "demo", "trial", "consultation"]):
             if has_known_contact:
                 return f"We have {contact_label} on file{greeting_name}—our team at {biz_name} will finalize that shortly."
             return f"To {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}, share your name along with your phone number or email."
@@ -1033,12 +1477,215 @@ class ChatClient:
         if newly_shared_contact:
             return f"Saved your contact info{greeting_name}. Our team at {biz_name} will follow up regarding your inquiry."
 
-        # 11. Frustrated non-KB complaint vs unconfirmed question vs conversational reply
+        # 11. Frustrated non-KB complaint vs unconfirmed question vs consultative conversational reply
         if behavior["emotion"] == "frustrated":
             if is_blunt:
                 return f"Tell me the exact detail you want from {biz_name}, or share your phone/email for direct follow-up."
             return f"I'm sorry for the trouble{greeting_name}. Share your exact question or leave your phone/email for a specialist at {biz_name}."
         question_starters = ("who ", "what ", "when ", "where ", "why ", "how ", "do you", "can you", "is there", "are you", "does ")
         if "?" in last_user_msg or last_user_msg.startswith(question_starters):
-            return f"That specific detail isn't listed in {biz_name}'s knowledge base.{goal_hook()}"
-        return f"Noted{greeting_name}.{goal_hook() or f' How else can {biz_name} help?'}"
+            if has_known_contact:
+                return f"I don't have that exact detail handy right here{greeting_name}, though our team at {biz_name} has your details and can confirm it directly."
+            if is_blunt:
+                return f"I don't have that exact detail handy — tell me what specifically you need or share your phone/email so our team can confirm."
+            return f"I don't have those exact details handy right here — could you share what specifically you're looking for, or leave your name and email/phone so {biz_name} can confirm directly?"
+        if len(query_tokens) >= 2 and not is_blunt:
+            if has_known_contact:
+                return f"Thanks for sharing that{greeting_name} — what specific requirements, features, or timeline do you have in mind so our team at {biz_name} can point you in the right direction?"
+            return f"Thanks for sharing that{greeting_name} — what specific requirements or timeline do you have in mind so {biz_name} can help best?"
+        if is_blunt:
+            return f"Got it{greeting_name}.{goal_hook() or f' Tell me specifically what you want from {biz_name}.'}"
+        return f"Got it{greeting_name} — what specifically would you like to explore with {biz_name} today?"
+
+    _PROJECT_SCOPING_SPECS = (
+        (
+            ("shopify", "woocommerce", "magento", "ecommerce", "e-commerce", "online store", "online shop", "storefront", "store"),
+            ("shopify", "ecommerce", "e-commerce", "store", "full-stack", "web", "next.js", "react", "ui/ux", "design", "mobile"),
+            lambda msg: "a Shopify store" if "shopify" in msg else ("a WooCommerce store" if "woocommerce" in msg else "an online store"),
+            "what products you're planning to sell, whether you need custom design or payment/shipping integrations",
+        ),
+        (
+            ("chatbot", "ai bot", "ai agent", "voice bot", "voice agent", "llm", "rag", "automation", "gpt", "gemini"),
+            ("ai", "llm", "rag", "chatbot", "agent", "automation", "gemini", "openai", "workflow"),
+            lambda msg: "an AI chatbot" if ("chatbot" in msg or "bot" in msg) else "an AI automation solution",
+            "what main workflows or channels (like website or WhatsApp) you want it to handle and any CRM/tool integrations you need",
+        ),
+        (
+            ("mobile app", "ios app", "android app", "flutter", "react native", "web app", "website", "saas", "dashboard", "portal", "crm", "erp", "platform", "software", "mvp", "app"),
+            ("full-stack", "web", "mobile", "flutter", "react", "next.js", "saas", "ui/ux", "cloud", "aws"),
+            lambda msg: (
+                "a mobile app" if any(k in msg for k in ("mobile app", "ios app", "android app", "flutter", "react native"))
+                else ("a SaaS platform" if "saas" in msg or "platform" in msg
+                else ("a CRM or portal" if any(k in msg for k in ("crm", "erp", "portal", "dashboard"))
+                else "a custom website or app"))
+            ),
+            "the core features or user flow you have in mind and your target platforms",
+        ),
+    )
+
+    _NEXT_STEP_PHRASES = {
+        "next step", "now next step", "what next", "whats next", "what is next",
+        "now what", "and then", "after that", "whats the next step",
+        "what is the next step", "how do i start", "how to start",
+        "where to start", "next", "next phase", "next steps", "what now",
+    }
+
+    @staticmethod
+    def _build_contextual_guidance_reply(
+        last_user_msg: str,
+        history: Optional[List[Dict[str, str]]],
+        biz_name: str,
+        greeting_name: str,
+        is_blunt: bool,
+        behavior: Dict[str, str],
+    ) -> Optional[str]:
+        """Handle low-pressure roadmap requests and context-aware 'next step' follow-ups without derailing."""
+        import re
+
+        if behavior.get("emotion") in ("frustrated", "price_hesitant", "skeptical"):
+            return None
+
+        clean_follow = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", last_user_msg)).strip()
+        is_roadmap_req = any(
+            p in last_user_msg
+            for p in (
+                "roadmap", "road map", "how to build", "how do i build",
+                "steps to build", "steps to create", "how to make", "how to create",
+            )
+        )
+        is_next_step = clean_follow in ChatClient._NEXT_STEP_PHRASES
+
+        if not is_roadmap_req and not is_next_step:
+            return None
+
+        prior_text = " ".join(
+            (m.get("content") or "").lower()
+            for m in (history or [])[:-1][-6:]
+        )
+        topic_text = f"{prior_text} {last_user_msg}"
+
+        if is_roadmap_req:
+            if any(k in topic_text for k in ("chatbot", "chat bot", "ai bot", "llm", "rag")):
+                if is_blunt:
+                    return "Step 1: gather clean FAQs/docs. Step 2: index embeddings + system prompt. Step 3: test accuracy and deploy via API/widget. Which step do you need next?"
+                return (
+                    f"No problem{greeting_name}—here is a clean roadmap to build an AI chatbot: start by defining the main questions/use cases and organizing clean docs, "
+                    "then wire your LLM with retrieval (RAG) and clear guardrails, and finally test edge cases before embedding the widget. Which step would you like to dig into?"
+                )
+            if any(k in topic_text for k in ("shopify", "ecommerce", "e-commerce", "online store", "store")):
+                return (
+                    f"Sure{greeting_name}—to build an online store, start by finalizing your catalog and brand layout, then configure theme/custom features plus payment and shipping integrations, "
+                    "and test checkout end-to-end before launch. Which stage are you currently focused on?"
+                )
+            return (
+                f"Of course{greeting_name}—a practical build roadmap starts with locking down core user goals and key features, designing the core flow/architecture, "
+                "building and testing incrementally, and rolling out live with monitoring. Which stage would you like to explore next?"
+            )
+
+        # Contextual "next step" follow-up based on what was just discussed
+        if any(k in prior_text for k in ("chatbot", "chat bot", "rag", "vector", "embedding", "prompt optimization", "api deployment", "llm")):
+            if any(k in prior_text for k in ("api deployment", "deployment", "vector", "rag", "orchestration")):
+                return (
+                    f"Once the pipeline and API are built{greeting_name}, the immediate next step is testing with real user questions—verifying accuracy, fallback handling, and latency—then embedding the chat widget and tracking live conversations. "
+                    "Would you like to go deeper into testing/evaluation or launching the widget?"
+                )
+            return (
+                f"The immediate next step{greeting_name} is listing your top customer questions and gathering clean business docs/FAQs so your retrieval data is solid before wiring the model. "
+                "Do you already have that content ready, or want help structuring it?"
+            )
+        if any(k in prior_text for k in ("shopify", "ecommerce", "e-commerce", "online store", "storefront")):
+            return (
+                f"Next step{greeting_name} is organizing your product list, deciding between a standard theme or custom design, and picking payment/shipping integrations so the build scope is clear. "
+                "Which piece are you tackling first?"
+            )
+        if any(k in prior_text for k in ("app", "website", "web", "saas", "blockchain", "web3", "software")):
+            return (
+                f"Next step{greeting_name} is narrowing down your must-have version-one features and target users before locking design and architecture. "
+                "Which core workflow do you want to define first?"
+            )
+        return (
+            f"The best next step{greeting_name} depends on where you are starting—tell me the specific goal or stage you're focusing on at {biz_name} and I'll walk you through what comes next."
+        )
+
+    def _build_project_scoping_reply(
+        self,
+        last_user_msg: str,
+        kb: str,
+        biz_name: str,
+        greeting_name: str,
+        user_profile: Optional[Dict[str, Any]],
+        user_turns: int,
+        has_known_contact: bool,
+        is_blunt: bool,
+        is_formal: bool,
+        goal_hook: Any,
+        behavior: Dict[str, str],
+        has_direct_kb_hit: bool = False,
+    ) -> Optional[str]:
+        """Build a warm, consultative scoping reply when a visitor states a project, store, or purchase goal."""
+        import re
+
+        if behavior.get("emotion") in ("frustrated", "price_hesitant", "skeptical"):
+            return None
+
+        goal_triggers = (
+            "want to build", "want to create", "want to launch", "want to start",
+            "want to make", "want a ", "want an ", "need a ", "need an ",
+            "looking to build", "looking to launch", "looking to start",
+            "looking to create", "looking to buy", "looking for a ", "looking for an ",
+            "planning to build", "planning to launch", "would like to build",
+            "build a ", "build me ", "create a ", "launch a ", "develop a ",
+            "interested in", "intersted",
+        )
+        has_explicit_goal = any(t in last_user_msg for t in goal_triggers)
+
+        matched_spec = None
+        for triggers, kb_tokens, label_fn, detail_prompt in self._PROJECT_SCOPING_SPECS:
+            pat = r"\b(?:" + "|".join(re.escape(t) for t in triggers) + r")\b"
+            if re.search(pat, last_user_msg):
+                matched_spec = (kb_tokens, label_fn(last_user_msg), detail_prompt)
+                break
+
+        # Pure factual questions or exact KB service/product requests without build-project framing use direct KB answers first.
+        if (not matched_spec and has_direct_kb_hit) or (
+            not has_explicit_goal and (
+                not matched_spec or "?" in last_user_msg or last_user_msg.startswith(("do you", "can you", "what ", "how ", "does ", "is "))
+            )
+        ):
+            return None
+
+        has_timeline = bool((user_profile or {}).get("timeline"))
+        timeline_q = "" if has_timeline else ", plus your target launch timeline"
+        action_verb = "Launching" if "launch" in last_user_msg else "Building"
+
+        if matched_spec:
+            kb_tokens, topic_label, detail_prompt = matched_spec
+            kb_matches = self._search_kb_lines(kb, list(kb_tokens), limit=1)
+            cap_head = ""
+            if kb_matches:
+                cap_head = kb_matches[0].split(":", 1)[0].strip().lstrip("-*• ") if ":" in kb_matches[0] else ""
+
+            if is_blunt:
+                base = f"Let's scope {topic_label}{greeting_name}. Tell me {detail_prompt}{timeline_q}."
+                return f"{base}{goal_hook() if not has_known_contact else ''}"
+
+            if is_formal:
+                opener = f"I would be delighted to help you plan {topic_label} with {biz_name}{greeting_name}."
+            else:
+                opener = f"{action_verb} {topic_label} is an exciting step{greeting_name}!"
+
+            if cap_head:
+                bridge = f"To help our {cap_head} team scope the right fit for you, could you share {detail_prompt}{timeline_q}?"
+            else:
+                bridge = f"To guide you properly at {biz_name}, could you share {detail_prompt}{timeline_q}?"
+            return f"{opener} {bridge}"
+
+        # Non-tech general goal/interest statement (e.g., "i am intersted", "looking to buy a home")
+        if has_explicit_goal:
+            if is_blunt:
+                return f"Tell me specifically what you need from {biz_name}{greeting_name}{'' if has_timeline else ' and your timeline'}.{goal_hook() if not has_known_contact else ''}"
+            if is_formal:
+                return f"Thank you for reaching out to {biz_name}{greeting_name}. Could you share your specific requirements{'' if has_timeline else ' and timeline'} so we can advise you accurately?"
+            return f"Glad you're looking into this with {biz_name}{greeting_name}! Could you share a bit more about what specifically you're aiming for{'' if has_timeline else ' and your preferred timeline'}?"
+
+        return None

@@ -6,9 +6,12 @@
 (function () {
   // Automatically detect backend API host from the script src itself so it works on any customer domain!
   let scriptOrigin = "";
-  if (document.currentScript && document.currentScript.src) {
+  const currentScriptEl =
+    document.currentScript ||
+    document.querySelector('script[src*="chat-widget.js"]');
+  if (currentScriptEl && currentScriptEl.src) {
     try {
-      scriptOrigin = new URL(document.currentScript.src).origin;
+      scriptOrigin = new URL(currentScriptEl.src, window.location.href).origin;
     } catch (e) {}
   }
 
@@ -37,13 +40,15 @@
     safeStorageSet(CONFIG.storageKey, sessionId);
   }
 
-  let botConfig = {
+  let rawServerConfig = {
     agentName: "Assistant",
     businessName: "Company",
     welcomeMessage: "Hello! How can I assist you today?",
     brandColor: "#00a884",
     quickPrompts: []
   };
+  let botConfig = { ...rawServerConfig };
+  let runtimeContextOverrides = {};
 
   // Build DOM Structure
   const launcher = document.createElement("button");
@@ -97,26 +102,40 @@
     </div>
   `;
 
-  document.body.appendChild(launcher);
-  document.body.appendChild(container);
-
-  const messagesEl = document.getElementById("cw-messages");
-  const promptsEl = document.getElementById("cw-prompts");
-  const inputEl = document.getElementById("cw-input");
-  const sendBtn = document.getElementById("cw-send-btn");
-  const resetBtn = document.getElementById("cw-reset-btn");
-  const closeBtn = document.getElementById("cw-close-btn");
-  const headerTitle = document.getElementById("cw-header-title");
-  const avatarEl = document.getElementById("cw-avatar");
+  const messagesEl = container.querySelector("#cw-messages");
+  const promptsEl = container.querySelector("#cw-prompts");
+  const inputEl = container.querySelector("#cw-input");
+  const sendBtn = container.querySelector("#cw-send-btn");
+  const resetBtn = container.querySelector("#cw-reset-btn");
+  const closeBtn = container.querySelector("#cw-close-btn");
+  const headerTitle = container.querySelector("#cw-header-title");
+  const avatarEl = container.querySelector("#cw-avatar");
   const headerEl = container.querySelector(".chat-widget-header");
+
+  function mountWidgetDom() {
+    if (!document.body.contains(launcher)) {
+      document.body.appendChild(launcher);
+    }
+    if (!document.body.contains(container)) {
+      document.body.appendChild(container);
+    }
+    initSession();
+    setupSelectorObserver();
+  }
 
   let isOpen = false;
 
   function toggleWidget() {
     isOpen = !isOpen;
     if (isOpen) {
+      applyEffectiveConfig();
       container.classList.add("active");
       launcher.style.transform = "rotate(90deg) scale(0.9)";
+      if (messagesEl.children.length === 0) {
+        appendMessage("bot", botConfig.welcomeMessage || "Hello! How can I help you today?", undefined, true);
+      }
+      renderWidgetQuickPrompts(botConfig.quickPrompts || []);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
       setTimeout(() => inputEl.focus(), 250);
     } else {
       container.classList.remove("active");
@@ -132,9 +151,12 @@
     return now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
-  function appendMessage(role, text, timeStr) {
+  function appendMessage(role, text, timeStr, isWelcomePlaceholder) {
     const msgDiv = document.createElement("div");
     msgDiv.className = `chat-widget-msg ${role}`;
+    if (isWelcomePlaceholder) {
+      msgDiv.dataset.welcomePlaceholder = "1";
+    }
     msgDiv.innerHTML = `
       <div class="chat-widget-bubble">${escapeHtml(text)}</div>
       <div class="chat-widget-timestamp">${timeStr || formatTime()}</div>
@@ -167,15 +189,26 @@
     return div.innerHTML;
   }
 
-  function renderWidgetQuickPrompts(prompts) {
-    promptsEl.innerHTML = "";
-    if (!prompts || prompts.length === 0) {
-      promptsEl.style.display = "none";
-      return;
+  function getEffectiveWidgetPrompts(prompts) {
+    if (Array.isArray(prompts) && prompts.length > 0) {
+      return prompts.filter(Boolean);
     }
+    const biz = botConfig.businessName || "your company";
+    return [
+      `What services does ${biz} offer?`,
+      "What are your prices & packages?",
+      "Where are you located?",
+      "How can I get started?",
+    ];
+  }
+
+  function renderWidgetQuickPrompts(prompts) {
+    const effective = getEffectiveWidgetPrompts(prompts);
+    promptsEl.innerHTML = "";
     promptsEl.style.display = "flex";
-    prompts.forEach((p) => {
+    effective.forEach((p) => {
       const pill = document.createElement("button");
+      pill.type = "button";
       pill.className = "chat-widget-pill";
       pill.textContent = p;
       pill.addEventListener("click", () => {
@@ -198,6 +231,119 @@
     return (r * 299 + g * 587 + b * 114) / 1000 >= 165 ? "#090c13" : "#ffffff";
   }
 
+  function cleanOverrideStr(val, maxLen) {
+    if (typeof val !== "string") return "";
+    const trimmed = val.replace(/\s+/g, " ").trim();
+    return trimmed ? trimmed.slice(0, maxLen || 160) : "";
+  }
+
+  function readAgentNameFromSelector(selector) {
+    if (!selector || typeof selector !== "string") return "";
+    try {
+      const el = document.querySelector(selector);
+      if (!el) return "";
+      const txt = cleanOverrideStr(el.textContent || el.innerText || "", 60);
+      return txt;
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function getScriptDataset() {
+    if (currentScriptEl && currentScriptEl.dataset) return currentScriptEl.dataset;
+    const fallbackEl = document.querySelector('script[src*="chat-widget.js"]');
+    return (fallbackEl && fallbackEl.dataset) || {};
+  }
+
+  function resolveDynamicOverrides() {
+    const winCtx = (window.CHATBOT_CONTEXT && typeof window.CHATBOT_CONTEXT === "object")
+      ? window.CHATBOT_CONTEXT
+      : {};
+    const ds = getScriptDataset();
+
+    const selector = cleanOverrideStr(
+      runtimeContextOverrides.agentSelector || winCtx.agentSelector || ds.agentSelector || "",
+      200
+    );
+    const selectorAgent = readAgentNameFromSelector(selector);
+
+    const agentName = cleanOverrideStr(
+      runtimeContextOverrides.agentName ||
+      runtimeContextOverrides.name ||
+      winCtx.agentName ||
+      winCtx.name ||
+      ds.agentName ||
+      selectorAgent ||
+      "",
+      80
+    );
+
+    const out = {};
+    if (agentName) out.agentName = agentName;
+
+    const optionalFields = [
+      ["businessName", ds.businessName, 120],
+      ["tone", ds.tone, 300],
+      ["agentGoal", ds.agentGoal, 300],
+      ["welcomeMessage", ds.welcomeMessage, 400],
+      ["brandColor", ds.brandColor, 32],
+    ];
+    optionalFields.forEach(([key, dsVal, maxLen]) => {
+      const resolved = cleanOverrideStr(
+        runtimeContextOverrides[key] || winCtx[key] || dsVal || "",
+        maxLen
+      );
+      if (resolved) out[key] = resolved;
+    });
+
+    if (Array.isArray(runtimeContextOverrides.quickPrompts) && runtimeContextOverrides.quickPrompts.length) {
+      out.quickPrompts = runtimeContextOverrides.quickPrompts;
+    } else if (Array.isArray(winCtx.quickPrompts) && winCtx.quickPrompts.length) {
+      out.quickPrompts = winCtx.quickPrompts;
+    }
+    return { overrides: out, selector };
+  }
+
+  function buildWidgetChatContext() {
+    const { overrides } = resolveDynamicOverrides();
+    const ctx = {};
+    ["agentName", "businessName", "tone", "agentGoal"].forEach((key) => {
+      if (overrides[key]) ctx[key] = overrides[key];
+    });
+    return ctx;
+  }
+
+  function applyEffectiveConfig() {
+    const { overrides } = resolveDynamicOverrides();
+    botConfig = { ...rawServerConfig, ...overrides };
+
+    const agent = botConfig.agentName || botConfig.botName || "Assistant";
+    const biz = botConfig.businessName || "";
+    headerTitle.innerText = biz ? `${agent} at ${biz}` : agent;
+    if (avatarEl) avatarEl.innerText = agent.charAt(0).toUpperCase();
+
+    if (botConfig.brandColor) {
+      document.documentElement.style.setProperty("--chat-primary", botConfig.brandColor);
+      document.documentElement.style.setProperty("--chat-primary-gradient", botConfig.brandColor);
+      const contrast = getContrastColor(botConfig.brandColor);
+      document.documentElement.style.setProperty("--chat-primary-contrast", contrast);
+      launcher.style.background = botConfig.brandColor;
+      launcher.style.color = contrast;
+      if (headerEl) {
+        headerEl.style.background = botConfig.brandColor;
+        headerEl.style.color = contrast;
+      }
+    }
+
+    const firstMsg = messagesEl.firstElementChild;
+    if (messagesEl.children.length === 1 && firstMsg && firstMsg.dataset.welcomePlaceholder === "1") {
+      const bubble = firstMsg.querySelector(".chat-widget-bubble");
+      if (bubble) bubble.innerText = botConfig.welcomeMessage || "Hello! How can I help you today?";
+    }
+
+    renderWidgetQuickPrompts(botConfig.quickPrompts || []);
+  }
+
   // Fetch dynamic config from backend
   async function loadConfig() {
     try {
@@ -205,31 +351,40 @@
         headers: { "bypass-tunnel-reminder": "1" }
       });
       if (res.ok) {
-        botConfig = await res.json();
-        const agent = botConfig.agentName || botConfig.botName || "Assistant";
-        const biz = botConfig.businessName || "";
-        headerTitle.innerText = biz ? `${agent} at ${biz}` : agent;
-        if (avatarEl) avatarEl.innerText = agent.charAt(0).toUpperCase();
-
-        if (botConfig.brandColor) {
-          document.documentElement.style.setProperty("--chat-primary", botConfig.brandColor);
-          document.documentElement.style.setProperty("--chat-primary-gradient", botConfig.brandColor);
-          const contrast = getContrastColor(botConfig.brandColor);
-          document.documentElement.style.setProperty("--chat-primary-contrast", contrast);
-          launcher.style.background = botConfig.brandColor;
-          launcher.style.color = contrast;
-          if (headerEl) {
-            headerEl.style.background = botConfig.brandColor;
-            headerEl.style.color = contrast;
-          }
-        }
-
-        renderWidgetQuickPrompts(botConfig.quickPrompts || []);
+        rawServerConfig = await res.json();
       }
     } catch (e) {
       console.warn("Could not fetch /api/config, using defaults", e);
     }
+    applyEffectiveConfig();
   }
+
+  // Observe host DOM briefly if data-agent-selector / agentSelector is configured for async frameworks
+  function setupSelectorObserver() {
+    const { selector } = resolveDynamicOverrides();
+    if (!selector || typeof MutationObserver === "undefined" || !document.body) return;
+    let lastSeen = readAgentNameFromSelector(selector);
+    const observer = new MutationObserver(() => {
+      const current = readAgentNameFromSelector(selector);
+      if (current && current !== lastSeen) {
+        lastSeen = current;
+        applyEffectiveConfig();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+
+  window.UniversalChatbot = {
+    setContext: function (nextCtx) {
+      if (nextCtx && typeof nextCtx === "object") {
+        runtimeContextOverrides = { ...runtimeContextOverrides, ...nextCtx };
+        applyEffectiveConfig();
+      }
+    },
+    refreshContext: function () {
+      applyEffectiveConfig();
+    }
+  };
 
   // Restore session history or display welcome message
   async function initSession() {
@@ -241,6 +396,10 @@
       if (res.ok) {
         const data = await res.json();
         if (data.history && data.history.length > 0) {
+          messagesEl.innerHTML = "";
+          if (data.history[0].role === "user" && botConfig.welcomeMessage) {
+            appendMessage("bot", botConfig.welcomeMessage);
+          }
           data.history.forEach((m) => {
             appendMessage(m.role === "assistant" ? "bot" : "user", m.content);
           });
@@ -250,8 +409,14 @@
     } catch (e) {
       console.warn("Session fetch fallback", e);
     }
-    // New visitor: show configured welcome message
-    appendMessage("bot", botConfig.welcomeMessage || "Hello! How can I help you today?");
+    // New visitor: show configured welcome message (replace any early placeholder)
+    const placeholder = messagesEl.querySelector('[data-welcome-placeholder="1"]');
+    if (placeholder) {
+      messagesEl.innerHTML = "";
+    }
+    if (messagesEl.children.length === 0) {
+      appendMessage("bot", botConfig.welcomeMessage || "Hello! How can I help you today?");
+    }
   }
 
   // Send message handler
@@ -266,16 +431,22 @@
     showTypingIndicator();
 
     try {
+      applyEffectiveConfig();
+      const widgetContext = buildWidgetChatContext();
+      const payload = {
+        sessionId: sessionId,
+        message: text,
+      };
+      if (Object.keys(widgetContext).length > 0) {
+        payload.widgetContext = widgetContext;
+      }
       const res = await fetch(`${CONFIG.apiBase}/api/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "bypass-tunnel-reminder": "1"
         },
-        body: JSON.stringify({
-          sessionId: sessionId,
-          message: text,
-        }),
+        body: JSON.stringify(payload),
       });
 
       hideTypingIndicator();
@@ -310,6 +481,7 @@
       safeStorageSet(CONFIG.storageKey, sessionId);
       messagesEl.innerHTML = "";
       appendMessage("bot", botConfig.welcomeMessage || "Hello! How can I help you today?");
+      renderWidgetQuickPrompts(botConfig.quickPrompts || []);
     });
   }
 
@@ -321,6 +493,10 @@
     }
   });
 
-  // Initialize on load
-  initSession();
+  // Initialize cleanly whether placed in <head> or <body>
+  if (document.body) {
+    mountWidgetDom();
+  } else {
+    document.addEventListener("DOMContentLoaded", mountWidgetDom);
+  }
 })();

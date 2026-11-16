@@ -39,6 +39,9 @@ INVALID_NAMES = {
     "when", "where", "which", "who", "dont", "don't", "never", "neither",
     "intersted", "intrested", "intereseted", "mad", "angry", "happy", "sad",
     "serious", "joking", "kidding", "asking", "wondering", "checking", "browsing",
+    "planning", "building", "creating", "developing", "launching", "starting",
+    "thinking", "trying", "hoping", "working", "searching", "exploring", "going",
+    "wanting", "needing", "willing", "running", "testing", "selling", "buying",
     "sorry", "oops", "apologies", "pardon", "actually", "correct", "corrected",
     "fixed", "updated", "typo", "mistake", "try", "again", "done", "sent",
     "gmail", "yahoo", "outlook", "hotmail", "icloud", "its", "thats"
@@ -55,7 +58,8 @@ NON_NAME_WORDS = INVALID_NAMES | {
     "hours", "timing", "timings", "package", "packages", "discount", "offer",
     "installment", "installments", "karachi", "clifton", "dha", "morning",
     "afternoon", "evening", "weekend", "monday", "tuesday", "wednesday",
-    "thursday", "friday", "saturday", "sunday", "good", "bad", "great"
+    "thursday", "friday", "saturday", "sunday", "good", "bad", "great",
+    "over", "right", "up", "down", "look", "stay", "come", "get", "just", "still"
 }
 
 def init_lead_storage():
@@ -249,6 +253,7 @@ def extract_lead_from_message(
     found_name = None
     name_patterns = [
         r"(?:my name is|name is|name\s*[:\-]|i am|i'm|this is|call me)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)",
+        r"^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s+here\b",
         r"^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s*[,|\-]\s*(?:.*@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+|\+?\d|\(\d)",
     ]
 

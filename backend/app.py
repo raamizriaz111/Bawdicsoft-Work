@@ -134,7 +134,22 @@ async def chat_endpoint(request):
 
     session_id = body.get("sessionId", "guest-session")
     user_message = body.get("message", "").strip()
-    override_config = body.get("config") or active_config
+    base_config = load_active_config()
+    raw_config = body.get("config")
+    if isinstance(raw_config, dict) and raw_config:
+        override_config = {**base_config, **{k: v for k, v in raw_config.items() if v is not None}}
+    else:
+        override_config = dict(base_config)
+
+    widget_ctx = body.get("widgetContext")
+    if isinstance(widget_ctx, dict):
+        for key, max_len in (("agentName", 80), ("businessName", 120), ("tone", 300), ("agentGoal", 300)):
+            val = widget_ctx.get(key)
+            if isinstance(val, str) and val.strip():
+                override_config[key] = val.strip()[:max_len]
+    top_agent_name = body.get("agentName")
+    if isinstance(top_agent_name, str) and top_agent_name.strip():
+        override_config["agentName"] = top_agent_name.strip()[:80]
 
     if not user_message:
         return JSONResponse({"error": "Empty message"}, status_code=400)
