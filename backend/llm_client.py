@@ -735,6 +735,11 @@ class ChatClient:
                                 user_profile=user_profile,
                                 config=config,
                             )
+                            parsed_result = self._enforce_greeting_pacing(
+                                parsed_result,
+                                last_user_raw=last_user_raw,
+                                config=config,
+                            )
                             parsed_result["source"] = model_to_call
                             return parsed_result
                         break
@@ -872,6 +877,45 @@ class ChatClient:
                     kb = (config or {}).get("knowledgeBase") or ""
                     parsed["reply"] = cls._build_company_contact_reply(biz_name, kb, (config or {}).get("tone") or "")
 
+        return parsed
+
+    @classmethod
+    def _enforce_greeting_pacing(
+        cls,
+        parsed: Dict[str, Any],
+        last_user_raw: str,
+        config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Prevent over-replying or unsolicited status reports on simple standalone greetings (e.g. 'hi' or 'hello')."""
+        import re
+        clean_user = re.sub(r"[^a-z\s']", "", (last_user_raw or "").lower()).strip()
+        standalone_greetings = {"hi", "hello", "hey", "hiya", "howdy", "salam", "assalam", "assalam o alaikum", "good morning", "good afternoon", "good evening"}
+
+        is_bare = clean_user in standalone_greetings
+        has_question = any(q in clean_user for q in ("how are", "how r", "hows", "how is", "how do you", "what", "where", "can you", "?")) or "?" in (last_user_raw or "")
+
+        if is_bare and not has_question:
+            reply = parsed.get("reply", "")
+            biz_name = (config or {}).get("businessName") or "our team"
+
+            has_unsolicited_status = bool(re.search(r"\b(?:doing\s+(?:great|well)|thanks\s+for\s+(?:asking|stopping\s+by))\b", reply, re.IGNORECASE))
+            has_multi_menu = bool(re.search(r"\b(?:are\s+you\s+looking\s+to|whether\s+you(?:'re|\s+are))\b.*\b(?:or\s+just|or\s+perhaps|or\s+check)\b", reply, re.IGNORECASE))
+            is_too_long = len(reply.split()) > 20
+
+            if has_unsolicited_status or has_multi_menu or is_too_long:
+                tone = ((config or {}).get("tone") or "").lower()
+                if "motivat" in tone or "energy" in tone:
+                    parsed["reply"] = f"Hey! Welcome to {biz_name}. How can I help you crush your goals today?"
+                elif "calm" in tone or "reassur" in tone:
+                    parsed["reply"] = f"Hello! Welcome to {biz_name}. How can I help you today?"
+                elif "formal" in tone or "legal" in tone:
+                    parsed["reply"] = f"Good day. Welcome to {biz_name}. How may I assist you today?"
+                elif "style" in tone or "sophisticat" in tone:
+                    parsed["reply"] = f"Hello! Welcome to {biz_name}. How may I assist you today?"
+                else:
+                    parsed["reply"] = f"Hi! Welcome to {biz_name}. How can I help you today?"
+                parsed["sales_stage"] = "greeting"
+                parsed["sales_tactic"] = "Warm Hospitality"
         return parsed
 
     @staticmethod
