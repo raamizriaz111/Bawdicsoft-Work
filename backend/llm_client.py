@@ -115,7 +115,10 @@ class ChatClient:
                 "post_capture",
             ] = Field(description="Current consultative sales stage after the visitor's message.")
             sales_tactic: str = Field(
-                description="2-5 word Title Case consultative sales tactic used in reply (e.g. 'Value Anchor + Payment Plan')."
+                description=(
+                    "2-5 word Title Case consultative human sales tactic used in reply (e.g. 'Warm Hospitality', 'Consultative Discovery', 'Value Anchor + Milestone Scoping', 'Social Proof + Guarantee'). "
+                    "NEVER use robotic or machine terms like 'System Operational Ready' or 'System Operational'."
+                )
             )
             extracted_name: Optional[str] = Field(
                 default=None,
@@ -189,8 +192,28 @@ class ChatClient:
     )
     _GREETING_EXACT = {
         "hi", "hello", "hey", "hi there", "hello there", "good morning",
-        "good afternoon", "good evening", "assalam o alaikum", "salam", "how are you",
+        "good afternoon", "good evening", "assalam o alaikum", "salam", "salam alaikum",
+        "how are you", "how are you doing", "how are you doing today", "how are you today",
+        "how r u", "how are u", "hows it going", "how is it going", "how is your day",
+        "how's your day", "how is everything", "whats up", "what's up", "wassup", "sup",
+        "good to see you", "hope you are well", "hope all is well", "are you good", "how do you do",
     }
+
+    @classmethod
+    def _is_greeting_message(cls, text: str) -> bool:
+        """Check if message is primarily a greeting or small talk check-in."""
+        import re
+        clean = re.sub(r"[^a-z\s']", "", (text or "").lower()).strip()
+        if clean in cls._GREETING_EXACT:
+            return True
+        return bool(
+            re.match(
+                r"^(?:hi|hello|hey|hiya|howdy|good\s+(?:morning|afternoon|evening)|salam|assalam(?:\s+o\s+alaikum)?|"
+                r"how\s+are\s+you(?:\s+doing)?(?:\s+today)?|how\s+r\s+u|hows\s+(?:it\s+going|your\s+day)|"
+                r"how\s+is\s+(?:it\s+going|your\s+day|everything)|what'?s\s+up|sup)\b",
+                clean
+            ) and len(clean.split()) <= 7 and not any(w in clean for w in ("quote", "price", "cost", "hiring", "job", "career", "service", "build"))
+        )
     _ACK_EXACT = {
         "ok", "okay", "k", "cool", "ok cool", "haha ok cool", "alright",
         "sounds good", "gotcha", "fair enough", "hmm", "hm", "nice", "wow",
@@ -325,6 +348,14 @@ class ChatClient:
         if clean_msg in ChatClient._OPTOUT_EXACT:
             return {"emotion": "neutral", "buyer_intent": "cold", "sales_tactic": "Graceful Exit + Door Open"}
 
+        has_contact = bool((user_profile or {}).get("email") or (user_profile or {}).get("phone"))
+        if ChatClient._is_greeting_message(raw_last_msg):
+            return {
+                "emotion": "neutral",
+                "buyer_intent": "warm" if has_contact else "cold",
+                "sales_tactic": "Warm Hospitality",
+            }
+
         rules = [
             ("neutral", "off_topic", "Polite Business Pivot",
              ("weather", "capital of", "president", "write a python", "write python", "write code", "binary search", "linked list", "write javascript", "code for me", "debug my", "joke", "poem", "recipe", "cricket score", "football", "world cup", "who won", "2+2", "solve ")),
@@ -332,7 +363,7 @@ class ChatClient:
             ("neutral", "warm", "Human Handoff Offer", ChatClient._HUMAN_HANDOFF_PHRASES),
             ("neutral", "cold", "Transparent AI Introduction", ChatClient._BOT_IDENTITY_PHRASES),
             ("neutral", "cold", "Warm Hospitality",
-             ("hi there", "hello there", "good morning", "good afternoon", "good evening", "how are you", "hello,")),
+             ("hi there", "hello there", "good morning", "good afternoon", "good evening", "how are you", "how are you doing", "how are you today", "hows it going", "how is it going", "how is your day", "hows your day", "whats up", "what's up", "wassup", "hello,")),
             ("frustrated", "warm", "Empathy + Direct Answer",
              ("stop asking", "just tell me", "annoying", "frustrated", "useless", "waste of time", "not helping", "already asked", "make no sense", "makes no sense", "so unhelpful", "repeating yourself")),
             ("neutral", "cold", "Respect Timing + Follow-Up", ChatClient._DEFERRAL_PHRASES),
@@ -425,24 +456,33 @@ class ChatClient:
         if budget_match:
             budget = budget_match.group(0).strip()
 
+        is_greeting = ChatClient._is_greeting_message(raw_last_msg or "")
+
         timeline = profile.get("timeline")
-        for marker in ("today", "tomorrow", "this week", "next week", "this month", "next month", "asap", "immediately", "urgent"):
-            if marker in low:
-                timeline = marker
-                break
+        if not is_greeting:
+            for marker in ("tomorrow", "this week", "next week", "this month", "next month", "asap", "immediately", "urgent"):
+                if marker in low:
+                    timeline = marker
+                    break
+            if not timeline and "today" in low:
+                if not any(w in low for w in ("how are", "how r", "hows", "how is", "doing today", "you today", "your day")):
+                    timeline = "today"
 
         objection = profile.get("objection_reason")
         if behavior["emotion"] in ("price_hesitant", "skeptical"):
             objection = behavior["emotion"]
 
         preferred_slot = profile.get("preferred_slot")
-        slot_match = re.search(
-            r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend)(?:\s+(?:at\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|morning|afternoon|evening))?\b|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
-            raw_last_msg or "",
-            re.IGNORECASE,
-        )
-        if slot_match:
-            preferred_slot = slot_match.group(0).strip()
+        if not is_greeting:
+            slot_match = re.search(
+                r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|weekend)(?:\s+(?:at\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|morning|afternoon|evening))?\b|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
+                raw_last_msg or "",
+                re.IGNORECASE,
+            )
+            if slot_match:
+                preferred_slot = slot_match.group(0).strip()
+            elif "today" in low and any(w in low for w in ("schedule", "book", "meeting", "call", "appointment", "slot", "consultation", "available", "at ")):
+                preferred_slot = "today"
 
         intent = behavior["buyer_intent"]
         if has_contact:
@@ -453,7 +493,7 @@ class ChatClient:
             sales_stage = "objection_handling"
         elif behavior["emotion"] == "confused":
             sales_stage = "recommendation"
-        elif behavior.get("sales_tactic") == "Warm Hospitality":
+        elif behavior.get("sales_tactic") == "Warm Hospitality" or is_greeting:
             sales_stage = "greeting"
         else:
             sales_stage = "discovery"
@@ -469,14 +509,24 @@ class ChatClient:
             base_score = min(100, base_score + 5)
 
         need = profile.get("specific_need")
-        if not need and intent != "off_topic" and behavior.get("sales_tactic") != "Graceful Exit + Door Open":
+        clean_ack_need = re.sub(r"[^a-z\s']", "", (raw_last_msg or "").lower()).strip()
+        vague_prompts = {"tell me", "tell me more", "explain", "go on", "what do you do", "what can you do", "overview", "what are your services", "what services"}
+        if (
+            not need
+            and intent != "off_topic"
+            and behavior.get("sales_tactic") != "Graceful Exit + Door Open"
+            and not is_greeting
+            and clean_ack_need not in vague_prompts
+        ):
             stripped_need = re.sub(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", "", raw_last_msg or "", flags=re.IGNORECASE)
             stripped_need = re.sub(r"\+?\d[\d\s\-().]{6,}\d", "", stripped_need).strip(" ,.-:")
-            clean_ack_need = re.sub(r"[^a-z\s]", "", stripped_need.lower()).strip()
+            clean_sub = re.sub(r"[^a-z\s]", "", stripped_need.lower()).strip()
             if (
                 len(stripped_need) > 6
-                and clean_ack_need not in ChatClient._GREETING_EXACT
-                and clean_ack_need not in ChatClient._ACK_EXACT
+                and clean_sub not in ChatClient._GREETING_EXACT
+                and clean_sub not in ChatClient._ACK_EXACT
+                and clean_sub not in vague_prompts
+                and not ChatClient._is_greeting_message(stripped_need)
             ):
                 need = stripped_need[:80]
 
@@ -560,6 +610,17 @@ class ChatClient:
             sales_stage = fallback_behavior.get("sales_stage", "discovery")
 
         sales_tactic = str(data.get("sales_tactic") or "").strip() or fallback_behavior["sales_tactic"]
+        if any(tok in sales_tactic.lower() for tok in ("operational ready", "system operational", "system ready", "diagnostic", "cpu", "server", "peak efficiency")):
+            sales_tactic = "Warm Hospitality" if sales_stage == "greeting" else "Consultative Discovery"
+
+        # Safety filter: prevent any robotic machine responses from ever reaching the client
+        if re.search(r"^(?:systems?\s+(?:are|is)\s+(?:fully\s+)?(?:online|operational|optimized|running)|firing\s+on\s+all\s+cylinders)\b", reply_text, re.IGNORECASE):
+            reply_text = re.sub(
+                r"^(?:systems?\s+(?:are|is)\s+(?:fully\s+)?(?:online|operational|optimized|running)[^.!?]*[.!?]\s*|firing\s+on\s+all\s+cylinders[^.!?]*[.!?]\s*)",
+                "Doing great, thank you for asking! ",
+                reply_text,
+                flags=re.IGNORECASE
+            ).strip()
 
         raw_score = data.get("lead_score")
         try:
@@ -1146,20 +1207,30 @@ class ChatClient:
                 return f"Noted{greeting_name}—we already have {contact_label} and {biz_name} is ready whenever you are."
             return f"Reach back out to {biz_name} whenever you're ready{greeting_name}, or drop your email/phone now to lock in your spot."
 
-        # 5. Pure greeting (do not hijack greetings followed by a real question like "Hi, what services...")
-        clean_ack = re.sub(r"[^a-z\s]", "", last_user_msg).strip()
-        is_pure_greeting = clean_ack in self._GREETING_EXACT or (
-            clean_ack.startswith(("hi ", "hello ", "hey ", "good morning", "good afternoon", "good evening", "how are you"))
-            and "?" not in last_user_msg
-            and len(clean_ack.split()) <= 5
-            and not any(w in clean_ack for w in ("what", "how", "where", "when", "price", "cost", "service", "book", "job", "hiring"))
-        )
+        # 4.5. Personal Check-in / How are you
+        is_check_in = any(p in last_user_msg for p in (
+            "how are you", "how r u", "how are u", "how are you doing", "how do you do",
+            "how is your day", "how's your day", "hows your day", "how is it going",
+            "hows it going", "how are things", "hope you are well", "hope all is well", "are you good"
+        ))
+        if is_check_in:
+            if is_blunt:
+                return f"Doing well{greeting_name}. What software or AI project can {biz_name} help you evaluate today?"
+            return f"I'm doing great, thank you for asking{greeting_name}! Hope you're having a productive day as well. How can {biz_name} help you today?"
+
+        # 5. Pure greeting
+        clean_ack = re.sub(r"[^a-z\s']", "", last_user_msg).strip()
+        is_pure_greeting = clean_ack in self._GREETING_EXACT or self._is_greeting_message(last_user_msg)
         if is_pure_greeting:
             if is_blunt:
                 return f"{agent_name} at {biz_name} here. Tell me what you need so we can {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}."
             if is_energetic:
                 return f"Hey{greeting_name}! {agent_name} from {biz_name} here — what can we help you accomplish today?"
             return f"Hello{greeting_name}! I'm {agent_name} at {biz_name}. How can I help you today?"
+
+        # 5.5 Short vague continuation ("tell me", "what do you do", "go on")
+        if clean_ack in ("tell me", "tell me more", "explain", "go on", "what do you do", "what can you do", "overview", "what are your services", "what services"):
+            return f"At {biz_name}, we specialize in 3 core engineering pillars: Custom AI & Autonomous Agents, Audited Blockchain & Web3 Systems, and High-Performance Web & Mobile platforms (plus our call-coaching product HOLOVOX). Are you looking to scope a new build from scratch, or automate something in your existing business?"
 
         # 6. Farewell
         if any(w in last_user_msg for w in ["bye", "goodbye", "see you", "cya", "have to go"]):

@@ -92,7 +92,7 @@ PRESETS = {
         "domain": "bawdicsoft.com",
         "agentName": "Bilal Assistant",
         "brandColor": "#06b6d4",
-        "tone": "Innovative, sharp, technical and consultative",
+        "tone": "Warm, sharp, consultative and innovative. Speaks naturally like a senior human technology advisor — never robotic or stiff.",
         "agentGoal": "Gather project requirements and schedule an architectural consultation with engineering leads",
         "heroBadge": "Software, AI & Web3 Engineering Agency",
         "heroTitle": "Architecting Next-Gen AI & Web3 Solutions",

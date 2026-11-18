@@ -243,7 +243,7 @@ def extract_lead_from_message(
     found_email = None
     email_match = EMAIL_REGEX.search(clean_msg)
     if email_match:
-        cand_email = email_match.group(0).lower()
+        cand_email = email_match.group(0).lower().rstrip(".,;:!?'\"")
         if "." in cand_email.split("@")[-1] and len(cand_email.split(".")[-1]) >= 2:
             found_email = cand_email
 
