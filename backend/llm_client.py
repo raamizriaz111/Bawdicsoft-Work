@@ -181,9 +181,11 @@ class ChatClient:
     )
     _BOT_IDENTITY_PHRASES = (
         "are you a bot", "are you ai", "are you real", "real person",
-        "human or ai", "bot or human", "who am i talking", "who are you",
-        "what is your name", "what's your name", "whats your name",
-        "tell me your name", "may i know your name", "who is this",
+        "human or ai", "bot or human", "who am i talking", "who are you", "who r u",
+        "what is your name", "what's your name", "whats your name", "what is ur name", "whats ur name",
+        "your name", "ur name", "agent name", "bot name", "assistant name",
+        "tell me your name", "may i know your name", "can i know your name",
+        "who is this", "whos this", "what should i call you", "what do i call you", "what can i call you",
     )
     _HUMAN_HANDOFF_PHRASES = (
         "talk to a human", "speak to a human", "real human", "real agent",
@@ -198,6 +200,40 @@ class ChatClient:
         "how's your day", "how is everything", "whats up", "what's up", "wassup", "sup",
         "good to see you", "hope you are well", "hope all is well", "are you good", "how do you do",
     }
+
+    @classmethod
+    def _is_bot_identity_inquiry(cls, text: str) -> bool:
+        """Detect whether the visitor is asking the bot for its name or identity."""
+        import re
+        clean = re.sub(r"[^a-z\s']", "", (text or "").lower()).strip()
+        if not clean:
+            return False
+
+        if re.search(r"\b(?:my name is|naam hai|this is)\b", clean):
+            return False
+
+        exact_phrases = {
+            "your name", "ur name", "name", "agent name", "bot name", "assistant name",
+            "who are you", "who r u", "who r you", "who is this", "whos this", "who am i talking to",
+            "what is your name", "whats your name", "what is ur name", "whats ur name",
+            "tell me your name", "may i know your name", "can i know your name",
+            "what should i call you", "what do i call you", "what can i call you",
+            "are you a bot", "are you ai", "are you real", "are you human"
+        }
+        if clean in exact_phrases:
+            return True
+
+        patterns = (
+            r"\b(?:your|ur|agent|bot|assistant)\s+name\b",
+            r"\b(?:who\s+are\s+you|who\s+r\s+u)\b",
+            r"\bwho\s+am\s+i\s+(?:talking|chatting|speaking)\s+(?:to|with)\b",
+            r"\bwhat\s+(?:is|s)\s+(?:your|ur)\s+name\b",
+            r"\b(?:asking|tell|give)\s+(?:me\s+)?(?:your|ur)\s+name\b",
+            r"\bwhat\s+(?:should|can|do)\s+i\s+call\s+you\b",
+            r"\bwho\s+is\s+this\b",
+            r"\bare\s+you\s+(?:a\s+)?(?:bot|ai|human|real)\b",
+        )
+        return any(re.search(p, clean) for p in patterns)
 
     @classmethod
     def _is_greeting_message(cls, text: str) -> bool:
@@ -813,6 +849,12 @@ class ChatClient:
                                 last_user_raw=last_user_raw,
                                 config=config,
                             )
+                            parsed_result = self._enforce_identity_integrity(
+                                parsed_result,
+                                last_user_raw=last_user_raw,
+                                config=config,
+                            )
+                            parsed_result["reply"] = self._clean_human_reply(parsed_result.get("reply", ""))
                             parsed_result["source"] = model_to_call
                             return parsed_result
                         break
@@ -834,8 +876,9 @@ class ChatClient:
                         break
 
         # Smart fallback responder for testing or when offline
+        fallback_reply = self._clean_human_reply(self._smart_mock_response(conversation_history, user_profile, config))
         return {
-            "reply": self._smart_mock_response(conversation_history, user_profile, config),
+            "reply": fallback_reply,
             **fallback_behavior,
             "source": "mock_fallback",
         }
@@ -849,11 +892,11 @@ class ChatClient:
         """
         Backwards-compatible plain-text wrapper returning the salesperson reply.
         """
-        return self.generate_analysis(
+        return self._clean_human_reply(self.generate_analysis(
             conversation_history=conversation_history,
             user_profile=user_profile,
             config=config,
-        )["reply"]
+        )["reply"])
 
     @staticmethod
     def _build_contact_correction_reply(
@@ -991,6 +1034,63 @@ class ChatClient:
                 parsed["sales_tactic"] = "Warm Hospitality"
         return parsed
 
+    @classmethod
+    def _enforce_identity_integrity(
+        cls,
+        parsed: Dict[str, Any],
+        last_user_raw: str,
+        config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Ensure bot name inquiries return a direct, authentic human intro without excuses or product confusion."""
+        if cls._is_bot_identity_inquiry(last_user_raw):
+            reply = parsed.get("reply", "")
+            agent_name = (config or {}).get("agentName") or "Bilal Assistant"
+            biz_name = (config or {}).get("businessName") or "BawdicSoft"
+
+            bad_triggers = (
+                "don't have", "do not have", "handy right here", "exact details",
+                "agent desk", "note-taking", "reduced manual", "share what specifically you're looking for",
+                "ready to gather project requirements"
+            )
+            has_bad = any(b in reply.lower() for b in bad_triggers)
+            has_name = agent_name.lower() in reply.lower()
+
+            if has_bad or not has_name or len(reply.split()) > 25:
+                parsed["reply"] = f"I'm {agent_name}, {biz_name}'s virtual sales consultant. How can I help you today?"
+                parsed["sales_stage"] = "greeting"
+                parsed["sales_tactic"] = "Transparent Introduction"
+        return parsed
+
+    @classmethod
+    def _clean_human_reply(cls, text: str) -> str:
+        """
+        Sanitize AI reply to look and feel 100% human:
+        - Strips markdown horizontal rules (---, ----, ___, etc.)
+        - Strips markdown bold/italic markers (**word**, *word*)
+        - Converts em-dashes (—) and en-dashes (–) to natural colons, commas, or clean pauses
+        - Eliminates repeated hyphens (-- or --- or ----)
+        - Cleans up awkward spacing and punctuation artifacts
+        """
+        if not text:
+            return ""
+        import re
+        # Remove markdown horizontal rules (e.g. \n---\n, \n----\n)
+        cleaned = re.sub(r"(?m)^\s*[-–—_*]{2,}\s*$", "", text)
+        # Remove inline multi-dashes (like ---- or --- or --)
+        cleaned = re.sub(r"\s*[-–—]{2,}\s*", ", ", cleaned)
+        # Strip markdown bold/italic asterisks cleanly so `**` never leaks into chat
+        cleaned = cleaned.replace("**", "").replace("*", "")
+        # Replace em-dashes with comma or space
+        cleaned = cleaned.replace(" — ", ", ").replace("—", ", ")
+        cleaned = cleaned.replace(" – ", ", ").replace("–", "-")
+        # Collapse multiple commas or weird punctuation like ", ," or ",."
+        cleaned = re.sub(r",\s*,+", ",", cleaned)
+        cleaned = re.sub(r",\s*\.", ".", cleaned)
+        cleaned = re.sub(r"\s+([,.?!])", r"\1", cleaned)
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
+        return cleaned.strip()
+
     @staticmethod
     def _format_kb_prose(lines: List[str]) -> str:
         """Convert raw KB bullet lines or sentences into clean, conversational prose."""
@@ -1008,7 +1108,7 @@ class ChatClient:
                 head, tail = s.split(":", 1)
                 tail = tail.strip()
                 if tail and len(head.strip()) <= 36:
-                    s = f"{head.strip()} — {tail}"
+                    s = f"{head.strip()}: {tail}"
             clean_end = s.rstrip('”"\'’):')
             if clean_end and clean_end[-1] not in ".!?":
                 s = clean_end + "."
@@ -1264,7 +1364,7 @@ class ChatClient:
         is_energetic = any(w in tone for w in ("high-energy", "energetic", "motivational", "excited", "playful"))
 
         if not history:
-            return f"Hello! I'm {agent_name} from {biz_name}. Let's get started — are you ready to {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}?"
+            return f"Hello! I'm {agent_name} from {biz_name}. Are you ready to {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}?"
 
         from backend.lead_manager import detect_invalid_contact_attempt, extract_lead_from_message
 
@@ -1284,6 +1384,10 @@ class ChatClient:
         )
         greeting_name = f", {user_name}" if user_name else ""
         behavior = self._classify_behavior_heuristic(history, user_profile)
+
+        # 0. Upfront Bot Identity & Name Inquiries (e.g. "your name?", "agent name", "who are you?", "who r u")
+        if self._is_bot_identity_inquiry(last_user_raw):
+            return f"I'm {agent_name}, {biz_name}'s virtual sales consultant. How can I help you today?"
 
         if invalid_contact and not (user_profile or {}).get(invalid_contact.get("type", "")):
             return self._build_contact_correction_reply(
@@ -1305,7 +1409,7 @@ class ChatClient:
         # 1. Off-topic general query fallback
         if behavior["buyer_intent"] == "off_topic":
             if is_blunt:
-                return f"Stick to {biz_name} topics—we don't handle random trivia here.{goal_hook()}"
+                return f"Stick to {biz_name} topics, we don't handle random trivia here.{goal_hook()}"
             return f"My focus is strictly on assisting you with {biz_name}.{goal_hook()}"
 
         # 2. Explicit disinterest / opt-out / competitor switch
@@ -1316,19 +1420,17 @@ class ChatClient:
 
         # 3. Transparent AI identity / human handoff requests
         if behavior["sales_tactic"] == "Transparent AI Introduction":
-            if has_known_contact:
-                return f"I'm {agent_name}, {biz_name}'s virtual AI assistant, and our team already has your contact info on file."
-            return f"I'm {agent_name}, {biz_name}'s virtual AI assistant.{goal_hook()}"
+            return f"I'm {agent_name}, {biz_name}'s virtual sales consultant. How can I help you today?"
 
         if behavior["sales_tactic"] == "Human Handoff Offer":
             if has_known_contact:
-                return f"Done{greeting_name}—our human team at {biz_name} already has {contact_label} on file."
+                return f"Done{greeting_name}, our human team at {biz_name} already has {contact_label} on file."
             return f"Drop your name and phone or email{greeting_name} so a specialist at {biz_name} can follow up."
 
         # 4. Polite time deferral / revisit later
         if any(p in last_user_msg for p in self._DEFERRAL_PHRASES):
             if has_known_contact:
-                return f"Noted{greeting_name}—we already have {contact_label} and {biz_name} is ready whenever you are."
+                return f"Noted{greeting_name}, we already have {contact_label} and {biz_name} is ready whenever you are."
             return f"Reach back out to {biz_name} whenever you're ready{greeting_name}, or drop your email/phone now to lock in your spot."
 
         # 4.5. Personal Check-in / How are you
@@ -1349,7 +1451,7 @@ class ChatClient:
             if is_blunt:
                 return f"{agent_name} at {biz_name} here. Tell me what you need so we can {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}."
             if is_energetic:
-                return f"Hey{greeting_name}! {agent_name} from {biz_name} here — what can we help you accomplish today?"
+                return f"Hey{greeting_name}! {agent_name} from {biz_name} here. What can we help you accomplish today?"
             return f"Hello{greeting_name}! I'm {agent_name} at {biz_name}. How can I help you today?"
 
         # 5.5 Short vague continuation ("tell me", "what do you do", "go on")
@@ -1464,7 +1566,7 @@ class ChatClient:
             )
             if proof_matches:
                 prose = self._format_kb_prose(proof_matches)
-                lead_in = "" if is_blunt else "Fair question — here's what backs us up: "
+                lead_in = "" if is_blunt else "Fair question, here's what backs us up: "
                 suffix = "" if behavior["emotion"] == "frustrated" else goal_hook()
                 return f"{lead_in}{prose}{suffix}"
 
@@ -1476,7 +1578,7 @@ class ChatClient:
             if price_matches:
                 prose = self._format_kb_prose(price_matches)
                 if behavior["emotion"] == "price_hesitant" and not is_blunt:
-                    lead_in = "I completely understand keeping budget in mind — "
+                    lead_in = "I completely understand keeping budget in mind, "
                 else:
                     lead_in = ""
                 suffix = "" if behavior["emotion"] == "frustrated" else goal_hook()
@@ -1530,8 +1632,8 @@ class ChatClient:
             kw_pat = r"\b" + re.escape(policy_kw) + r"\b"
             if re.search(kw_pat, last_user_msg) and not re.search(kw_pat, kb.lower()):
                 return (
-                    f"I don't have our exact {policy_kw.upper() if len(policy_kw) <= 3 else policy_kw} terms handy right here — "
-                    f"our team at {biz_name} can confirm that with you on a quick call.{'' if (has_known_contact or behavior['emotion'] == 'frustrated') else goal_hook()}"
+                    f"I don't have our exact {policy_kw.upper() if len(policy_kw) <= 3 else policy_kw} terms handy right here. "
+                    f"Our team at {biz_name} can confirm that with you on a quick call.{'' if (has_known_contact or behavior['emotion'] == 'frustrated') else goal_hook()}"
                 )
 
         # Educational roadmap requests & context-aware "next step" follow-ups (checked early before token search)
@@ -1608,8 +1710,8 @@ class ChatClient:
             if fresh_lines:
                 return _finish_kb_reply(self._format_kb_prose(fresh_lines))
             return (
-                f"At {biz_name}, I can share specifics on our services, past projects, or engagement pricing — "
-                f"which would be most useful for you next?"
+                f"At {biz_name}, I can share specifics on our services, past projects, or engagement pricing. "
+                f"Which would be most useful for you next?"
             )
 
         # Broad Services / Portfolio section summaries
@@ -1687,7 +1789,7 @@ class ChatClient:
         # 9. Booking / Appointment / Demo -> Lead Capture (never re-ask contact if known)
         if not newly_shared_contact and any(w in last_user_msg for w in ["book", "appointment", "viewing", "schedule", "demo", "trial", "consultation"]):
             if has_known_contact:
-                return f"We have {contact_label} on file{greeting_name}—our team at {biz_name} will finalize that shortly."
+                return f"We have {contact_label} on file{greeting_name}, our team at {biz_name} will finalize that shortly."
             return f"To {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}, share your name along with your phone number or email."
 
         # 10. Email or phone provided
@@ -1704,15 +1806,15 @@ class ChatClient:
             if has_known_contact:
                 return f"I don't have that exact detail handy right here{greeting_name}, though our team at {biz_name} has your details and can confirm it directly."
             if is_blunt:
-                return f"I don't have that exact detail handy — tell me what specifically you need or share your phone/email so our team can confirm."
-            return f"I don't have those exact details handy right here — could you share what specifically you're looking for, or leave your name and email/phone so {biz_name} can confirm directly?"
+                return f"I don't have that exact detail right here. What specifically do you need so our team can confirm?"
+            return f"I don't have that exact detail right here. Could you tell me a bit more about what you're looking for so our team can confirm?"
         if len(query_tokens) >= 2 and not is_blunt:
             if has_known_contact:
-                return f"Thanks for sharing that{greeting_name} — what specific requirements, features, or timeline do you have in mind so our team at {biz_name} can point you in the right direction?"
-            return f"Thanks for sharing that{greeting_name} — what specific requirements or timeline do you have in mind so {biz_name} can help best?"
+                return f"Thanks for sharing that{greeting_name}, what specific requirements, features, or timeline do you have in mind so our team at {biz_name} can point you in the right direction?"
+            return f"Thanks for sharing that{greeting_name}, what specific requirements or timeline do you have in mind so {biz_name} can help best?"
         if is_blunt:
             return f"Got it{greeting_name}.{goal_hook() or f' Tell me specifically what you want from {biz_name}.'}"
-        return f"Got it{greeting_name} — what specifically would you like to explore with {biz_name} today?"
+        return f"Got it{greeting_name}. What specifically would you like to explore with {biz_name} today?"
 
     _PROJECT_SCOPING_SPECS = (
         (
@@ -1786,16 +1888,16 @@ class ChatClient:
                 if is_blunt:
                     return "Step 1: gather clean FAQs/docs. Step 2: index embeddings + system prompt. Step 3: test accuracy and deploy via API/widget. Which step do you need next?"
                 return (
-                    f"No problem{greeting_name}—here is a clean roadmap to build an AI chatbot: start by defining the main questions/use cases and organizing clean docs, "
+                    f"No problem{greeting_name}, here is a clean roadmap to build an AI chatbot: start by defining the main questions/use cases and organizing clean docs, "
                     "then wire your LLM with retrieval (RAG) and clear guardrails, and finally test edge cases before embedding the widget. Which step would you like to dig into?"
                 )
             if any(k in topic_text for k in ("shopify", "ecommerce", "e-commerce", "online store", "store")):
                 return (
-                    f"Sure{greeting_name}—to build an online store, start by finalizing your catalog and brand layout, then configure theme/custom features plus payment and shipping integrations, "
+                    f"Sure{greeting_name}, to build an online store, start by finalizing your catalog and brand layout, then configure theme/custom features plus payment and shipping integrations, "
                     "and test checkout end-to-end before launch. Which stage are you currently focused on?"
                 )
             return (
-                f"Of course{greeting_name}—a practical build roadmap starts with locking down core user goals and key features, designing the core flow/architecture, "
+                f"Of course{greeting_name}, a practical build roadmap starts with locking down core user goals and key features, designing the core flow/architecture, "
                 "building and testing incrementally, and rolling out live with monitoring. Which stage would you like to explore next?"
             )
 
@@ -1803,7 +1905,7 @@ class ChatClient:
         if any(k in prior_text for k in ("chatbot", "chat bot", "rag", "vector", "embedding", "prompt optimization", "api deployment", "llm")):
             if any(k in prior_text for k in ("api deployment", "deployment", "vector", "rag", "orchestration")):
                 return (
-                    f"Once the pipeline and API are built{greeting_name}, the immediate next step is testing with real user questions—verifying accuracy, fallback handling, and latency—then embedding the chat widget and tracking live conversations. "
+                    f"Once the pipeline and API are built{greeting_name}, the immediate next step is testing with real user questions, verifying accuracy, fallback handling, and latency, then embedding the chat widget and tracking live conversations. "
                     "Would you like to go deeper into testing/evaluation or launching the widget?"
                 )
             return (
@@ -1821,7 +1923,7 @@ class ChatClient:
                 "Which core workflow do you want to define first?"
             )
         return (
-            f"The best next step{greeting_name} depends on where you are starting—tell me the specific goal or stage you're focusing on at {biz_name} and I'll walk you through what comes next."
+            f"The best next step{greeting_name} depends on where you are starting. Tell me the specific goal or stage you're focusing on at {biz_name} and I'll walk you through what comes next."
         )
 
     def _build_project_scoping_reply(
