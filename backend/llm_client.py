@@ -330,6 +330,93 @@ class ChatClient:
         return f"You can reach our team at {biz_name} directly during business hours."
 
     @staticmethod
+    def _build_leadership_inquiry_reply(
+        biz_name: str,
+        kb: str,
+        last_user_msg: str,
+        tone: str = "",
+        greeting_name: str = "",
+        has_known_contact: bool = False,
+        goal_hook = None
+    ) -> str:
+        """
+        Deliver a warm, executive-level introduction to company founders, leadership, or directors,
+        pairing domain prestige with consultative sales discovery rather than bare contacts.
+        """
+        import re
+        msg_low = last_user_msg.lower()
+        is_blunt = any(w in (tone or "").lower() for w in ("rude", "aggressive", "blunt", "abusive", "harsh", "impatient", "direct", "sarcastic"))
+        is_formal = any(w in (tone or "").lower() for w in ("formal", "confidential", "executive", "legal"))
+
+        # 1. Syed Bilal Hashmi / Founder / CEO
+        if any(k in msg_low for k in ("bilal", "hashmi", "ceo", "founder", "who started", "who founded", "who created", "who owns")):
+            if "bilal" in kb.lower() or "founder" in kb.lower():
+                ceo_email = "syedbilalhashmi@bawdicsoft.com" if "syedbilalhashmi@bawdicsoft.com" in kb else None
+                email_mention = f" (direct executive contact: {ceo_email})" if ceo_email and not is_blunt else ""
+                if is_blunt:
+                    return f"Syed Bilal Hashmi is the Founder & CEO of {biz_name}. What specific project or inquiry do you have?"
+                if is_formal:
+                    return (
+                        f"Syed Bilal Hashmi is the Founder and Chief Executive Officer of {biz_name}{email_mention}. "
+                        f"He directs our enterprise strategy, AI research, and engineering operations. Are you looking to discuss a potential partnership or schedule an architectural consultation with our leadership team?"
+                    )
+                return (
+                    f"Syed Bilal Hashmi is the Founder & CEO of {biz_name}{email_mention}. He leads our executive vision and engineering strategy across custom software, AI, and Web3 initiatives. "
+                    f"Are you looking to connect with Bilal regarding an upcoming project, or exploring software development with our team?"
+                )
+
+        # 2. Muhammad Zubair / Director
+        if "zubair" in msg_low:
+            if "zubair" in kb.lower() or "director" in kb.lower():
+                if is_blunt:
+                    return f"Muhammad Zubair is a Director at {biz_name}. What do you need from us?"
+                return (
+                    f"Muhammad Zubair is a Director at {biz_name}, guiding technical delivery, operations, and client success across our engineering teams. "
+                    f"Are you exploring a collaboration or custom project with our team?"
+                )
+
+        # 3. General Leadership / Executive Team inquiry
+        if any(k in msg_low for k in ("who runs", "who leads", "who heads", "leads the", "leadership", "executive", "director", "management team", "owner", "who is in charge", "in charge")):
+            leaders = []
+            for line in kb.split("\n"):
+                cl = line.strip().lstrip("-*• ")
+                if not cl or re.match(r"^#{1,6}\s+|^\d+\.\s+", cl) or (cl.endswith(":") and len(cl) <= 45):
+                    continue
+                has_role = any(
+                    re.search(r"\b" + re.escape(role) + r"\b", cl, re.IGNORECASE)
+                    for role in ("founder", "ceo", "director", "dentist", "managing partner", "head trainer", "attorney", "counsel")
+                )
+                if has_role and not any(w in cl.lower() for w in ("dentistry", "policy", "hours", "requirement")):
+                    clean_line = cl.replace("**", "").replace("*", "").strip().rstrip(".!?;, ")
+                    if len(clean_line) <= 130 and not clean_line.endswith(":"):
+                        leaders.append(clean_line)
+            if leaders:
+                leader_str = "; ".join(leaders[:2])
+                if is_blunt:
+                    return f"{biz_name} leadership: {leader_str}. What's your project?"
+                return (
+                    f"{biz_name} is led by {leader_str}, supported by a specialized team dedicated to client success. "
+                    f"Are you looking to schedule an initial consultation or discuss a specific need with our team?"
+                )
+
+        # 4. Unknown team member query ("who is Alex", "who is John")
+        stop_name_tokens = {
+            "who", "the", "and", "for", "with", "about", "tell", "name", "leads", "runs", "heads",
+            "company", "organization", "firm", "business", "this", "that", "there", "team", "agency",
+            "charge", "clinic", "practice", "gym", "store", "studio", "office", "desk", "hospital"
+        }
+        tokens = [w for w in re.findall(r"[a-z]{3,}", msg_low) if w not in stop_name_tokens]
+        unmatched_name = tokens[0].title() if tokens else "that person"
+        if "bawdicsoft" in biz_name.lower():
+            team_info = "Our core leadership includes Syed Bilal Hashmi (Founder & CEO) and Muhammad Zubair (Director)."
+        else:
+            team_info = f"Our team at {biz_name} is led by experienced practitioners and leadership."
+        return (
+            f"I don't have a team member named {unmatched_name} listed with {biz_name}. "
+            f"{team_info} What specific area or question can our team help you with?"
+        )
+
+    @staticmethod
     def _classify_behavior_heuristic(
         conversation_history: List[Dict[str, str]],
         user_profile: Optional[Dict[str, Any]] = None,
@@ -687,24 +774,24 @@ class ChatClient:
             analysis_schema = self._get_analysis_schema()
             models_to_try = [
                 self.model_name,
-                "gemini-3.5-flash-lite",
                 "gemini-3.1-flash-lite",
                 "gemini-3.8-flash",
+                "gemini-3.5-flash-lite",
             ]
             unique_models = []
             for m in models_to_try:
                 if m and m not in unique_models:
                     unique_models.append(m)
 
-            # Enforce a hard 20.0s total failover budget so visitors never stall indefinitely
-            deadline = time.monotonic() + 20.0
+            # Enforce a 25.0s total failover budget so visitors never stall indefinitely
+            deadline = time.monotonic() + 25.0
             for model_to_call in unique_models[:3]:
                 for attempt in range(2):
                     remaining = deadline - time.monotonic()
                     if remaining < 1.5:
                         break
                     executor = None
-                    model_timeout = round(min(10.0, remaining), 2)
+                    model_timeout = round(min(12.0, remaining), 2)
                     try:
                         def _call_model():
                             cfg_kwargs = {
@@ -926,6 +1013,8 @@ class ChatClient:
             s = re.sub(r"^\s*[-*•#]+\s*", "", raw or "").strip()
             if not s:
                 continue
+            # Strip markdown bold/italic asterisks cleanly
+            s = s.replace("**", "").replace("*", "").strip()
             if ":" in s and not s.lower().startswith(("http://", "https://")):
                 head, tail = s.split(":", 1)
                 tail = tail.strip()
@@ -1143,8 +1232,10 @@ class ChatClient:
                 score += 6
             if any(k in clean_kws for k in ("address", "located", "location", "office", "headquarters", "where")) and any(m in text_low for m in ("headquartered", "suite", "building", "road", "street", "clifton", "dha", "karachi")):
                 score += 5
-            if any(k in clean_kws for k in ("ceo", "director", "founder", "leads", "who")) and any(m in text_low for m in ("ceo", "director", "founder", "syed bilal hashmi")):
-                score += 6
+            if any(k in clean_kws for k in ("ceo", "director", "founder", "leads", "who", "bilal", "hashmi", "zubair")) and any(m in text_low for m in ("ceo", "director", "founder", "syed bilal hashmi", "muhammad zubair")):
+                score += 15
+            if any(k in clean_kws for k in ("who", "bilal", "hashmi", "zubair", "founder", "ceo", "director")) and any(m in text_low for m in ("phone and whatsapp", "+92", "tel:", "call:", "email:")):
+                score -= 10
             if any(k in clean_kws for k in ("motto", "values", "mission")) and "motto" in text_low:
                 score += 6
             if any(k in clean_kws for k in ("sla", "uptime", "support", "coverage")) and any(m in text_low for m in ("sla", "uptime", "24/7", "iso 27001")):
@@ -1356,6 +1447,26 @@ class ChatClient:
                 return f"We have your {', '.join(parts)} on file{greeting_name}."
             return f"I don't have your contact details saved yet{greeting_name}."
 
+        # 6a. Leadership / Founder / Executive Team inquiries ("who is bilal", "who is the ceo", "who founded")
+        leadership_triggers = (
+            "bilal", "hashmi", "zubair", "ceo", "founder", "co-founder", "director", "owner",
+            "who founded", "who started", "who created", "who leads", "who runs", "leadership",
+            "executive team", "management team", "who is in charge"
+        )
+        is_leadership_query = any(t in last_user_msg for t in leadership_triggers) and not newly_shared_contact
+        if is_leadership_query and not any(p in last_user_msg for p in ("my name is", "i am bilal", "i'm bilal", "call me bilal")):
+            leadership_reply = self._build_leadership_inquiry_reply(
+                biz_name=biz_name,
+                kb=kb,
+                last_user_msg=last_user_msg,
+                tone=tone,
+                greeting_name=greeting_name,
+                has_known_contact=has_known_contact,
+                goal_hook=goal_hook,
+            )
+            if leadership_reply:
+                return leadership_reply
+
         # 6. Skeptical / Trust / Proof inquiries
         if behavior["emotion"] == "skeptical":
             proof_matches = self._search_kb_lines(
@@ -1420,8 +1531,8 @@ class ChatClient:
             if wants_booking or behavior["emotion"] in ("urgent", "excited") or behavior["buyer_intent"] in ("hot", "urgent") or is_blunt:
                 return f"{prose_text}{goal_hook()}"
             if user_turns <= 1:
-                return f"{prose_text} Are you exploring a specific project or use case here?"
-            return f"{prose_text} Let me know if you would like more details or have any questions about this!"
+                return f"{prose_text} Are you exploring a specific project or technical goal with us?"
+            return f"{prose_text} Are you looking into developing a custom solution with us, or exploring technical feasibility?"
 
         # Check explicit unconfirmed policy terms absent from KB (e.g., NDA, refunds, SLA)
         for policy_kw in ("nda", "non-disclosure", "refund", "money-back", "warranty", "sla"):
