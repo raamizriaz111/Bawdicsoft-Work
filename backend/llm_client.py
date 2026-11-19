@@ -351,29 +351,18 @@ class ChatClient:
         # 1. Syed Bilal Hashmi / Founder / CEO
         if any(k in msg_low for k in ("bilal", "hashmi", "ceo", "founder", "who started", "who founded", "who created", "who owns")):
             if "bilal" in kb.lower() or "founder" in kb.lower():
-                ceo_email = "syedbilalhashmi@bawdicsoft.com" if "syedbilalhashmi@bawdicsoft.com" in kb else None
-                email_mention = f" (direct executive contact: {ceo_email})" if ceo_email and not is_blunt else ""
                 if is_blunt:
-                    return f"Syed Bilal Hashmi is the Founder & CEO of {biz_name}. What specific project or inquiry do you have?"
+                    return f"Syed Bilal Hashmi is the Founder & CEO of {biz_name}. What do you need help with?"
                 if is_formal:
-                    return (
-                        f"Syed Bilal Hashmi is the Founder and Chief Executive Officer of {biz_name}{email_mention}. "
-                        f"He directs our enterprise strategy, AI research, and engineering operations. Are you looking to discuss a potential partnership or schedule an architectural consultation with our leadership team?"
-                    )
-                return (
-                    f"Syed Bilal Hashmi is the Founder & CEO of {biz_name}{email_mention}. He leads our executive vision and engineering strategy across custom software, AI, and Web3 initiatives. "
-                    f"Are you looking to connect with Bilal regarding an upcoming project, or exploring software development with our team?"
-                )
+                    return f"Syed Bilal Hashmi is the Founder and CEO of {biz_name}. Are you looking to discuss a partnership or schedule a consultation with our leadership?"
+                return f"Syed Bilal Hashmi is the Founder & CEO of {biz_name}. Are you looking to connect with him regarding an upcoming project?"
 
         # 2. Muhammad Zubair / Director
         if "zubair" in msg_low:
             if "zubair" in kb.lower() or "director" in kb.lower():
                 if is_blunt:
-                    return f"Muhammad Zubair is a Director at {biz_name}. What do you need from us?"
-                return (
-                    f"Muhammad Zubair is a Director at {biz_name}, guiding technical delivery, operations, and client success across our engineering teams. "
-                    f"Are you exploring a collaboration or custom project with our team?"
-                )
+                    return f"Muhammad Zubair is a Director at {biz_name}. What's your project?"
+                return f"Muhammad Zubair is a Director at {biz_name}. Are you exploring a project or collaboration with our team?"
 
         # 3. General Leadership / Executive Team inquiry
         if any(k in msg_low for k in ("who runs", "who leads", "who heads", "leads the", "leadership", "executive", "director", "management team", "owner", "who is in charge", "in charge")):
@@ -393,11 +382,8 @@ class ChatClient:
             if leaders:
                 leader_str = "; ".join(leaders[:2])
                 if is_blunt:
-                    return f"{biz_name} leadership: {leader_str}. What's your project?"
-                return (
-                    f"{biz_name} is led by {leader_str}, supported by a specialized team dedicated to client success. "
-                    f"Are you looking to schedule an initial consultation or discuss a specific need with our team?"
-                )
+                    return f"{biz_name} is led by {leader_str}. What's your project?"
+                return f"{biz_name} is led by {leader_str}. Are you looking to discuss a project with our team?"
 
         # 4. Unknown team member query ("who is Alex", "who is John")
         stop_name_tokens = {
@@ -1015,14 +1001,17 @@ class ChatClient:
                 continue
             # Strip markdown bold/italic asterisks cleanly
             s = s.replace("**", "").replace("*", "").strip()
+            # Discard incomplete hanging lead-ins like "including:" or "such as:"
+            if any(s.lower().endswith(w) for w in ("including:", "including", "such as:", "such as", "as follows:")):
+                continue
             if ":" in s and not s.lower().startswith(("http://", "https://")):
                 head, tail = s.split(":", 1)
                 tail = tail.strip()
                 if tail and len(head.strip()) <= 36:
                     s = f"{head.strip()} — {tail}"
-            clean_end = s.rstrip('”"\'’)')
+            clean_end = s.rstrip('”"\'’):')
             if clean_end and clean_end[-1] not in ".!?":
-                s += "."
+                s = clean_end + "."
             cleaned.append(s)
         return " ".join(cleaned)
 
@@ -1526,13 +1515,15 @@ class ChatClient:
         )
 
         def _finish_kb_reply(prose_text: str) -> str:
-            if behavior["emotion"] == "frustrated" or has_known_contact:
+            if behavior["emotion"] == "frustrated" or has_known_contact or "?" in prose_text:
                 return prose_text
             if wants_booking or behavior["emotion"] in ("urgent", "excited") or behavior["buyer_intent"] in ("hot", "urgent") or is_blunt:
                 return f"{prose_text}{goal_hook()}"
+            if len(prose_text.split()) > 24:
+                return prose_text
             if user_turns <= 1:
-                return f"{prose_text} Are you exploring a specific project or technical goal with us?"
-            return f"{prose_text} Are you looking into developing a custom solution with us, or exploring technical feasibility?"
+                return f"{prose_text} Are you looking to start a new project?"
+            return f"{prose_text} What specific features are you looking to build?"
 
         # Check explicit unconfirmed policy terms absent from KB (e.g., NDA, refunds, SLA)
         for policy_kw in ("nda", "non-disclosure", "refund", "money-back", "warranty", "sla"):
