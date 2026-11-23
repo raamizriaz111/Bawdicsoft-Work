@@ -188,6 +188,10 @@ Target Outcome: {goal}
                 f"INVALID/INCOMPLETE {contact_issue.get('type', 'contact').upper()} SUBMITTED ('{contact_issue.get('value')}'): "
                 f"{contact_issue.get('reason')}. DO NOT confirm or pretend it was saved! Point out what is missing and ask them to share the complete valid {contact_issue.get('type', 'contact')}."
             )
+
+        agent_directive = user_profile.get("_agent_directive")
+        if agent_directive:
+            context_lines.append(f"AGENT ACTION DIRECTIVE: {agent_directive}")
     else:
         context_lines.append("Current Sales Stage: 'greeting'")
         context_lines.append("Verified Contact Status: NONE ON FILE YET: uncover needs naturally and invite a valid phone/email when ready.")

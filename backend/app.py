@@ -39,6 +39,7 @@ from backend.session_manager import (
     get_total_chats_count,
     init_session_storage
 )
+from backend.agent import SalesAgent, AgentDecision
 
 # Initialize storage and LLM client
 init_lead_storage()
@@ -293,12 +294,31 @@ async def chat_endpoint(request):
         )
         lead_updated = True
 
-    # 6. Persist assistant reply to history
+    # 6. Evaluate deterministic Decision Layer rules ("The LLM proposes, code decides")
+    decision = SalesAgent.decide_and_act(
+        session_id=session_id,
+        user_message=user_message,
+        analysis=analysis,
+        user_profile=profile,
+        config=override_config,
+        tenant_id="default"
+    )
+    reply = SalesAgent.harmonize_reply(reply, decision, profile, override_config)
+    if decision.runtime_note:
+        profile["_agent_directive"] = decision.runtime_note
+
+    # 7. Persist assistant reply to history
     append_session_message(session_id, "assistant", reply)
 
     # Return reply along with live behavioral intelligence, qualification, lead info, and updated stats
     return JSONResponse({
         "reply": reply,
+        "decision": {
+            "action_type": decision.action_type,
+            "actions_logged": decision.actions_logged,
+            "slots_offered": decision.slots_offered,
+            "meta": decision.meta
+        },
         "analysis": {
             "emotion": analysis["emotion"],
             "buyer_intent": analysis["buyer_intent"],
@@ -385,6 +405,33 @@ async def clear_leads_endpoint(request):
     clear_all_leads()
     return JSONResponse({"status": "cleared", "total": 0, "leads": []})
 
+async def get_actions_endpoint(request):
+    """Retrieve audit log of executed/logged agent actions."""
+    from backend.database import SessionLocal
+    from backend.models import ActionModel
+    session_id = request.query_params.get("sessionId")
+    limit = int(request.query_params.get("limit", 50))
+    with SessionLocal() as db:
+        query = db.query(ActionModel)
+        if session_id:
+            query = query.filter_by(session_id=session_id)
+        actions = query.order_by(ActionModel.id.desc()).limit(limit).all()
+        return JSONResponse({
+            "total": len(actions),
+            "actions": [
+                {
+                    "id": a.id,
+                    "session_id": a.session_id,
+                    "tool_name": a.tool_name,
+                    "input_data": a.input_data,
+                    "output_data": a.output_data,
+                    "status": a.status,
+                    "created_at": a.created_at.isoformat() if a.created_at else None,
+                }
+                for a in actions
+            ]
+        })
+
 def is_port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('127.0.0.1', port)) != 0
@@ -420,6 +467,7 @@ routes = [
     Route("/api/leads/export", export_leads_csv, methods=["GET"]),
     Route("/api/leads/delete", delete_lead_endpoint, methods=["POST"]),
     Route("/api/leads/clear", clear_leads_endpoint, methods=["POST"]),
+    Route("/api/actions", get_actions_endpoint, methods=["GET"]),
     Mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static"),
 ]
 
