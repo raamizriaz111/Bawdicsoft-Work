@@ -1,6 +1,7 @@
 """
 Lead extraction, persistence, and statistics manager for Universal Client Chatbot Studio.
-Guarantees clean lead validation, prevents false positives, and persists to local JSON.
+Backed by PostgreSQL/SQLAlchemy with multi-tenant isolation.
+Preserves all legacy public function signatures so app.py and CLI operate unchanged.
 """
 
 import json
@@ -9,9 +10,13 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from sqlalchemy.orm import Session as DBSession
+
+from backend.database import SessionLocal, init_db
+from backend.models import LeadModel
 
 DATA_DIR = Path(__file__).parent.parent / "data"
-LEADS_FILE = DATA_DIR / "leads.json"
+LEGACY_LEADS_FILE = DATA_DIR / "leads.json"
 
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 PHONE_CANDIDATE_REGEX = re.compile(
@@ -63,33 +68,98 @@ NON_NAME_WORDS = INVALID_NAMES | {
 }
 
 def init_lead_storage():
-    """Ensure data directory and leads.json exist."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not LEADS_FILE.exists():
-        with open(LEADS_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f, indent=2)
+    """Ensure database tables exist and migrate legacy leads.json if present."""
+    init_db()
+    _migrate_legacy_leads()
+
+def _migrate_legacy_leads():
+    """Migrate legacy leads.json into PostgreSQL if DB table is empty."""
+    if not LEGACY_LEADS_FILE.exists():
+        return
+    try:
+        with SessionLocal() as db:
+            count = db.query(LeadModel).count()
+            if count > 0:
+                return  # DB already has leads
+
+            with open(LEGACY_LEADS_FILE, "r", encoding="utf-8") as f:
+                raw_leads = json.load(f)
+
+            if not isinstance(raw_leads, list):
+                return
+
+            for item in raw_leads:
+                if not isinstance(item, dict):
+                    continue
+                lead_obj = LeadModel(
+                    tenant_id=item.get("tenant_id") or "default",
+                    session_id=item.get("session_id"),
+                    name=item.get("name") or "Interested Visitor",
+                    email=item.get("email"),
+                    phone=item.get("phone"),
+                    interest=item.get("interest"),
+                    specific_need=item.get("specific_need"),
+                    budget=item.get("budget"),
+                    timeline=item.get("timeline"),
+                    preferred_slot=item.get("preferred_slot"),
+                    objection_reason=item.get("objection_reason"),
+                    lead_score=int(item.get("lead_score") or 0),
+                    deal_summary=item.get("deal_summary"),
+                    buyer_intent=item.get("buyer_intent"),
+                    sales_stage=item.get("sales_stage"),
+                    sales_tactic=item.get("sales_tactic"),
+                    emotion=item.get("emotion"),
+                    business_name=item.get("business_name") or "General Client",
+                    notes=item.get("notes"),
+                    created_at=datetime.fromisoformat(item["created_at"]) if item.get("created_at") else datetime.utcnow(),
+                    updated_at=datetime.fromisoformat(item["updated_at"]) if item.get("updated_at") else datetime.utcnow(),
+                )
+                db.add(lead_obj)
+            db.commit()
+    except Exception as e:
+        print(f"[LeadManager] Legacy migration note: {e}")
+
+def _lead_to_dict(lead: LeadModel) -> Dict[str, Any]:
+    """Convert LeadModel to dictionary matching original lead_manager contract."""
+    return {
+        "id": f"lead_{lead.id:04d}",
+        "session_id": lead.session_id,
+        "business_name": lead.business_name or "General Client",
+        "name": lead.name,
+        "email": lead.email,
+        "phone": lead.phone,
+        "interest": lead.interest,
+        "specific_need": lead.specific_need,
+        "budget": lead.budget,
+        "timeline": lead.timeline,
+        "preferred_slot": lead.preferred_slot,
+        "objection_reason": lead.objection_reason,
+        "lead_score": lead.lead_score,
+        "deal_summary": lead.deal_summary,
+        "buyer_intent": lead.buyer_intent,
+        "sales_stage": lead.sales_stage,
+        "sales_tactic": lead.sales_tactic,
+        "emotion": lead.emotion,
+        "notes": lead.notes,
+        "created_at": lead.created_at.isoformat() if lead.created_at else datetime.utcnow().isoformat(),
+        "updated_at": lead.updated_at.isoformat() if lead.updated_at else datetime.utcnow().isoformat(),
+        "tenant_id": lead.tenant_id,
+    }
 
 def is_valid_name(name_candidate: str) -> bool:
     """Validate that candidate string is an actual plausible name, not gibberish or noise."""
     if not name_candidate:
         return False
-    
     clean = name_candidate.strip()
     if len(clean) < 2 or len(clean) > 40:
         return False
-
     if clean.lower() in INVALID_NAMES:
         return False
-
-    # Check for vowels (prevents keyboard mash like 'jfjfjd')
     vowels = set("aeiouyAEIOUY")
     if not any(char in vowels for char in clean):
         return False
-
-    # Must contain only alphabetic characters, spaces, hyphens
     if not re.match(r"^[A-Za-z\s\-']+$", clean):
         return False
-
     return True
 
 def canonical_phone_digits(phone: Optional[str]) -> str:
@@ -99,99 +169,104 @@ def canonical_phone_digits(phone: Optional[str]) -> str:
         digits = digits[2:]
     return digits
 
-
-def phones_match(phone_a: Optional[str], phone_b: Optional[str]) -> bool:
-    """Check whether two formatted phone numbers refer to the same number across local/country formats."""
-    da = canonical_phone_digits(phone_a)
-    db = canonical_phone_digits(phone_b)
-    if not da or not db:
+def phones_match(p1: Optional[str], p2: Optional[str]) -> bool:
+    """Check if two raw phone numbers resolve to the same canonical digits."""
+    d1 = canonical_phone_digits(p1)
+    d2 = canonical_phone_digits(p2)
+    if not d1 or not d2:
         return False
-    if da == db:
+    if d1 == d2:
         return True
-    return len(da) >= 10 and len(db) >= 10 and da[-10:] == db[-10:]
+    if len(d1) >= 9 and len(d2) >= 9:
+        return d1[-9:] == d2[-9:]
+    return False
 
+def validate_candidate_name(raw_name: Optional[str]) -> Optional[str]:
+    """Clean and validate candidate name."""
+    if not raw_name:
+        return None
+    name = raw_name.strip()
+    name = re.sub(r"^(?:my name is|name is|i am|i'm|this is|call me)\s+", "", name, flags=re.IGNORECASE).strip()
+    name = re.sub(r"[,\-_|].*$", "", name).strip()
+    name = re.sub(r"[^A-Za-z\s\-']", "", name).strip()
+    tokens = [t for t in name.split() if t.lower() not in NON_NAME_WORDS]
+    if not tokens:
+        return None
+    filtered_name = " ".join(tokens)
+    if not is_valid_name(filtered_name):
+        return None
+    return filtered_name.title()
 
-def extract_phone_from_message(message: str, masked_email: Optional[str] = None) -> Optional[str]:
-    """Extract a realistic phone number while ignoring currency figures, dates, and street numbers."""
-    if not message:
+def extract_phone_from_message(clean_msg: str, masked_email: Optional[str] = None) -> Optional[str]:
+    """Extract phone number safely protecting prices, dates, times, and emails."""
+    text_to_scan = clean_msg
+    if masked_email:
+        text_to_scan = text_to_scan.replace(masked_email, " ")
+
+    matches = list(PHONE_CANDIDATE_REGEX.finditer(text_to_scan))
+    if not matches:
         return None
 
-    scan_text = message
-    if masked_email:
-        idx = scan_text.lower().find(masked_email.lower())
-        if idx != -1:
-            scan_text = scan_text[:idx] + (" " * len(masked_email)) + scan_text[idx + len(masked_email):]
+    low_msg = clean_msg.lower()
+    has_explicit_phone_ctx = any(re.search(r"\b" + re.escape(w) + r"\b", low_msg) for w in PHONE_CONTEXT_WORDS)
 
-    has_phone_context = any(
-        re.search(r"\b" + re.escape(w) + r"\b", scan_text, re.IGNORECASE)
-        for w in PHONE_CONTEXT_WORDS
-    )
+    for m in matches:
+        cand = m.group(1).strip()
+        start, end = m.start(), m.end()
 
-    for match in PHONE_CANDIDATE_REGEX.finditer(scan_text):
-        cand = re.sub(r"\s+", " ", match.group(1)).strip()
-        if "," in cand:
-            continue
-        # Reject ISO / localized dates such as 2026-11-12 or 12-11-2026
-        if re.match(r"^(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})$", cand):
-            continue
-
-        prefix = scan_text[max(0, match.start() - 8):match.start()].lower()
-        suffix = scan_text[match.end():min(len(scan_text), match.end() + 8)].lower()
+        prefix = text_to_scan[max(0, start - 10):start].lower()
+        suffix = text_to_scan[end:min(len(text_to_scan), end + 10)].lower()
         if any(marker in prefix or marker in suffix for marker in CURRENCY_MARKERS):
+            continue
+        if re.search(r":|\b(?:am|pm)\b", suffix) or ":" in cand:
             continue
 
         digits = re.sub(r"\D", "", cand)
-        if not (7 <= len(digits) <= 15):
+        if len(digits) < 7 or len(digits) > 15:
             continue
-        if len(digits) < 10 and not (has_phone_context or any(ch in cand for ch in ("+", "-", "(", ")"))):
+
+        if len(digits) == 4 and not cand.startswith("+") and not cand.startswith("0"):
             continue
-        return cand
+
+        if re.search(r"\b(?:suite|apt|room|building|floor)\s*#?$", prefix):
+            continue
+
+        if len(digits) >= 10:
+            return cand
+        if len(digits) >= 7 and (cand.startswith("+") or cand.startswith("0") or has_explicit_phone_ctx or "-" in cand or " " in cand):
+            return cand
 
     return None
 
-
 def detect_invalid_contact_attempt(
     message: str,
-    found_email: Optional[str],
-    found_phone: Optional[str],
+    found_email: Optional[str] = None,
+    found_phone: Optional[str] = None,
     prev_assistant_msg: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
-    """Detect malformed/incomplete email or too-short phone attempts so the bot asks for correction instead of falsely confirming."""
-    clean_msg = (message or "").strip()
+    """Detect malformed emails and too-short phone submissions."""
+    clean_msg = message.strip()
     if not clean_msg:
         return None
 
     if not found_email:
-        for match in re.finditer(r"[^\s,;\"'<>()]+@[^\s,;\"'<>()]*|@[^\s,;\"'<>()]+", clean_msg):
-            tok = match.group(0).rstrip(".,;:!?")
-            if tok == "@":
+        malformed_tokens = re.findall(r"\b[A-Za-z0-9_.+-]+@\S*", clean_msg)
+        for tok in malformed_tokens:
+            tok_clean = tok.rstrip(".,;:!?'\"")
+            if "@" not in tok_clean:
                 continue
-            local, _, domain = tok.partition("@")
+            parts = tok_clean.split("@", 1)
+            domain = parts[1] if len(parts) > 1 else ""
             if not domain:
                 return {
                     "type": "email",
-                    "value": tok,
-                    "reason": "missing the domain after '@' (for example, name@gmail.com)",
-                }
-            if not local:
-                asked_email = bool(prev_assistant_msg and re.search(r"\b(e-?mail|inbox)\b", prev_assistant_msg, re.IGNORECASE))
-                if "." in domain or asked_email:
-                    return {
-                        "type": "email",
-                        "value": tok,
-                        "reason": "missing the username before '@' (for example, name@gmail.com)",
-                    }
-                continue
-            if "@" in domain or ".." in tok or domain.startswith(".") or domain.endswith("."):
-                return {
-                    "type": "email",
-                    "value": tok,
-                    "reason": "incomplete or invalid domain format (for example, name@gmail.com)",
+                    "value": tok_clean,
+                    "reason": "missing the domain after '@' (e.g. '@gmail.com')",
                 }
             if "." not in domain or len(domain.rsplit(".", 1)[-1]) < 2:
                 return {
                     "type": "email",
-                    "value": tok,
+                    "value": tok_clean,
                     "reason": "missing a full domain extension such as '.com'",
                 }
 
@@ -228,18 +303,13 @@ def detect_invalid_contact_attempt(
 
     return None
 
-
 def extract_lead_from_message(
     message: str,
     prev_assistant_msg: Optional[str] = None,
 ) -> Dict[str, Optional[str]]:
-    """
-    Extract email, phone number, and customer name from user message.
-    Strictly ignores prices, addresses, gibberish, and generic non-name inputs.
-    """
+    """Extract email, phone number, and customer name from user message."""
     clean_msg = message.strip()
 
-    # 1. Email & Phone extraction (mask email before scanning for digits)
     found_email = None
     email_match = EMAIL_REGEX.search(clean_msg)
     if email_match:
@@ -249,7 +319,6 @@ def extract_lead_from_message(
 
     found_phone = extract_phone_from_message(clean_msg, masked_email=found_email)
 
-    # 2. Name extraction: explicit intro, Name: X, paired "<Name>, <contact>", or leftover name around contact/name prompt
     found_name = None
     name_patterns = [
         r"(?:my name is|name is|name\s*[:\-]|i am|i'm|this is|call me)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)",
@@ -261,79 +330,58 @@ def extract_lead_from_message(
         match = re.search(pattern, clean_msg, re.IGNORECASE)
         if match:
             candidate = match.group(1).strip()
-            valid_words = []
-            for w in candidate.split():
-                if w.lower() in NON_NAME_WORDS:
-                    break
-                valid_words.append(w)
+            validated = validate_candidate_name(candidate)
+            if validated:
+                found_name = validated
+                break
 
-            if valid_words and len(valid_words) <= 3:
-                candidate_name = " ".join(valid_words).title()
-                if is_valid_name(candidate_name):
-                    found_name = candidate_name
-                    break
+    if not found_name and (found_email or found_phone):
+        rem = clean_msg
+        if found_email:
+            rem = rem.replace(found_email, " ")
+        if found_phone:
+            rem = rem.replace(found_phone, " ")
+        for noise in ("email", "phone", "number", "contact", "whatsapp", "is", ":", "-", ","):
+            rem = re.sub(r"\b" + re.escape(noise) + r"\b", " ", rem, flags=re.IGNORECASE)
+        cand = rem.strip()
+        if cand and len(cand.split()) <= 3:
+            validated = validate_candidate_name(cand)
+            if validated:
+                found_name = validated
 
-    if not found_name:
-        prompted_for_name = bool(
-            prev_assistant_msg and re.search(r"\byour name\b|\bhave your name\b", prev_assistant_msg, re.IGNORECASE)
-        )
-        if found_email or found_phone:
-            # Strip extracted contact tokens and separators to inspect any leading/trailing clean name
-            remainder = clean_msg
-            if found_email:
-                remainder = re.sub(re.escape(found_email), " ", remainder, flags=re.IGNORECASE)
-            if found_phone:
-                remainder = remainder.replace(found_phone, " ")
-            remainder = re.sub(r"[,:|;\-/]+", " ", remainder).strip()
-            words = remainder.split()
-            if 1 <= len(words) <= 3 and all(w.lower() not in NON_NAME_WORDS for w in words):
-                cand = " ".join(words).title()
-                if is_valid_name(cand):
-                    found_name = cand
-        elif prompted_for_name and "?" not in clean_msg and "!" not in clean_msg:
-            words = clean_msg.split()
-            if 1 <= len(words) <= 3 and all(w.lower() not in NON_NAME_WORDS for w in words):
-                cand = " ".join(words).title()
-                if is_valid_name(cand):
-                    found_name = cand
+    if not found_name and prev_assistant_msg:
+        low_prev = prev_assistant_msg.lower()
+        if any(p in low_prev for p in ("your name", "who am i speaking with", "may i have your name", "who is this")):
+            first_clause = re.split(r"[,.?!\n]", clean_msg)[0].strip()
+            validated = validate_candidate_name(first_clause)
+            if validated and len(validated.split()) <= 3:
+                found_name = validated
 
-    return {"name": found_name, "email": found_email, "phone": found_phone}
-
-def validate_candidate_name(name_candidate: Optional[str]) -> Optional[str]:
-    """Validate an extracted name (from regex or LLM) against strict non-name and gibberish guards."""
-    if not name_candidate or not isinstance(name_candidate, str):
-        return None
-    clean = re.sub(r"\s+", " ", name_candidate).strip(" .,:-!?")
-    words = clean.split()
-    if not (1 <= len(words) <= 3):
-        return None
-    if any(w.lower() in NON_NAME_WORDS for w in words):
-        return None
-    if not is_valid_name(clean):
-        return None
-    return clean.title()
-
+    return {
+        "email": found_email,
+        "phone": found_phone,
+        "name": found_name
+    }
 
 def _is_substantive_summary(text: Optional[str], buyer_intent: Optional[str] = None) -> bool:
-    """Return False for off-topic/filler summaries that should not overwrite an existing qualified brief."""
-    if not text or not isinstance(text, str):
-        return False
-    if buyer_intent == "off_topic":
+    """Return True if text has actual topic content rather than generic intent label."""
+    if not text:
         return False
     low = text.strip().lower()
-    if len(low) < 12:
+    placeholders = {
+        "interested visitor", "verified lead", "general inquiry", "inquiry",
+        "chat inquiry", "hot", "warm", "cold", "off_topic"
+    }
+    if low in placeholders:
         return False
-    boilerplate_markers = (
-        "off-topic", "off topic", "professional boundaries", "maintaining boundaries",
-        "redirecting back", "evaluating options", "general inquiry", "short ack",
-        "visitor said", "unrelated query",
-    )
-    return not any(marker in low for marker in boilerplate_markers)
-
+    if buyer_intent and low == buyer_intent.lower():
+        return False
+    tokens = [w for w in re.findall(r"[a-z0-9]{3,}", low) if w not in {"the", "and", "for", "with", "lead", "deal", "summary"}]
+    return len(tokens) >= 2
 
 def save_lead(
-    session_id: str,
-    name: Optional[str],
+    session_id: Optional[str] = None,
+    name: Optional[str] = None,
     email: Optional[str] = None,
     phone: Optional[str] = None,
     interest: Optional[str] = None,
@@ -343,151 +391,140 @@ def save_lead(
     buyer_intent: Optional[str] = None,
     sales_tactic: Optional[str] = None,
     qualification: Optional[Dict[str, Any]] = None,
+    tenant_id: str = "default",
 ) -> Dict[str, Any]:
-    """Save or update a lead in leads.json with progressive qualification & contact merge."""
-    init_lead_storage()
+    """Save or update a lead in the database with progressive qualification & contact merge."""
+    init_db()
 
     clean_email = email.strip().lower() if email and email.strip() else None
     clean_phone = re.sub(r"\s+", " ", phone).strip() if phone and phone.strip() else None
-
-    try:
-        with open(LEADS_FILE, "r", encoding="utf-8") as f:
-            leads: List[Dict[str, Any]] = json.load(f)
-    except Exception:
-        leads = []
-
-    # Match existing lead by email, normalized phone digits, or active session (without clobbering a distinct contact)
-    existing_index = None
-    for idx, item in enumerate(leads):
-        item_email = (item.get("email") or "").lower()
-        item_phone = item.get("phone")
-        if clean_email and item_email == clean_email:
-            existing_index = idx
-            break
-        if clean_phone and item_phone and phones_match(item_phone, clean_phone):
-            existing_index = idx
-            break
-
-    if existing_index is None and session_id:
-        for idx, item in enumerate(leads):
-            if item.get("session_id") != session_id:
-                continue
-            item_email = (item.get("email") or "").lower()
-            item_phone = item.get("phone")
-            email_compatible = not clean_email or not item_email or item_email == clean_email
-            phone_compatible = not clean_phone or not item_phone or phones_match(item_phone, clean_phone)
-            if email_compatible and phone_compatible:
-                existing_index = idx
-                break
-
-    timestamp = datetime.now().isoformat()
     clean_name = validate_candidate_name(name)
     qual = qualification or {}
+    now = datetime.utcnow()
 
-    if existing_index is not None:
-        existing_lead = leads[existing_index]
-        existing_name = existing_lead.get("name")
-        if clean_name and (not existing_name or existing_name == "Interested Visitor"):
-            existing_lead["name"] = clean_name
-        if clean_email and not existing_lead.get("email"):
-            existing_lead["email"] = clean_email
-        if clean_phone and not existing_lead.get("phone"):
-            existing_lead["phone"] = clean_phone
-        if interest and (
-            _is_substantive_summary(interest, buyer_intent)
-            or not existing_lead.get("interest")
-            or existing_lead.get("interest") == "General Inquiry"
-        ):
-            existing_lead["interest"] = interest
-        if business_name:
-            existing_lead["business_name"] = business_name
-        if emotion:
-            existing_lead["emotion"] = emotion
-        if buyer_intent:
-            intent_rank = {"off_topic": 0, "cold": 1, "warm": 2, "hot": 3}
-            prev_intent = existing_lead.get("buyer_intent")
-            if intent_rank.get(buyer_intent, 0) >= intent_rank.get(prev_intent, 0):
-                existing_lead["buyer_intent"] = buyer_intent
-        if sales_tactic:
-            existing_lead["sales_tactic"] = sales_tactic
+    with SessionLocal() as db:
+        existing_lead = None
 
-        for field in ("specific_need", "budget", "timeline", "preferred_slot", "objection_reason", "sales_stage", "deal_summary"):
-            val = qual.get(field)
-            if isinstance(val, str) and val.strip():
-                if field == "deal_summary" and existing_lead.get("deal_summary") and not _is_substantive_summary(val, buyer_intent):
-                    continue
-                existing_lead[field] = val.strip()
-        if isinstance(qual.get("lead_score"), (int, float)):
-            prev_score = int(existing_lead.get("lead_score") or 0)
-            existing_lead["lead_score"] = max(prev_score, max(0, min(100, int(qual["lead_score"]))))
+        # 1. Match by email or phone within tenant
+        if clean_email:
+            existing_lead = db.query(LeadModel).filter_by(tenant_id=tenant_id, email=clean_email).first()
+        if not existing_lead and clean_phone:
+            candidates = db.query(LeadModel).filter_by(tenant_id=tenant_id).filter(LeadModel.phone.isnot(None)).all()
+            for cand in candidates:
+                if phones_match(cand.phone, clean_phone):
+                    existing_lead = cand
+                    break
 
-        existing_lead["updated_at"] = timestamp
-        saved_lead = existing_lead
-    else:
-        if not clean_email and not clean_phone:
-            raise ValueError("At least an email or phone number is required to create a new lead.")
-        raw_score = qual.get("lead_score")
-        lead_score = max(0, min(100, int(raw_score))) if isinstance(raw_score, (int, float)) else 75
-        existing_nums = [
-            int(str(item.get("id", "")).split("_")[1])
-            for item in leads
-            if str(item.get("id", "")).startswith("lead_") and str(item.get("id", "")).split("_")[1].isdigit()
-        ]
-        next_num = max(existing_nums, default=0) + 1
-        saved_lead = {
-            "id": f"lead_{next_num:04d}",
-            "session_id": session_id,
-            "business_name": business_name or "General Client",
-            "name": clean_name or "Interested Visitor",
-            "email": clean_email,
-            "phone": clean_phone,
-            "interest": interest or "General Inquiry",
-            "notes": notes or "Captured via Chatbot",
-            "emotion": emotion or "curious",
-            "buyer_intent": buyer_intent or "hot",
-            "sales_tactic": sales_tactic or "Direct Lead Close",
-            "sales_stage": qual.get("sales_stage") or "post_capture",
-            "specific_need": qual.get("specific_need"),
-            "budget": qual.get("budget"),
-            "timeline": qual.get("timeline"),
-            "preferred_slot": qual.get("preferred_slot"),
-            "objection_reason": qual.get("objection_reason"),
-            "lead_score": lead_score,
-            "deal_summary": qual.get("deal_summary") or interest or "Verified Lead",
-            "created_at": timestamp,
-            "updated_at": timestamp
-        }
-        leads.insert(0, saved_lead)
+        # 2. Match by active session within tenant
+        if not existing_lead and session_id:
+            candidates = db.query(LeadModel).filter_by(tenant_id=tenant_id, session_id=session_id).all()
+            for cand in candidates:
+                email_compat = not clean_email or not cand.email or cand.email == clean_email
+                phone_compat = not clean_phone or not cand.phone or phones_match(cand.phone, clean_phone)
+                if email_compat and phone_compat:
+                    existing_lead = cand
+                    break
 
-    with open(LEADS_FILE, "w", encoding="utf-8") as f:
-        json.dump(leads, f, indent=2)
+        if existing_lead:
+            if clean_name and (not existing_lead.name or existing_lead.name == "Interested Visitor"):
+                existing_lead.name = clean_name
+            if clean_email and not existing_lead.email:
+                existing_lead.email = clean_email
+            if clean_phone and not existing_lead.phone:
+                existing_lead.phone = clean_phone
+            if interest and (
+                _is_substantive_summary(interest, buyer_intent)
+                or not existing_lead.interest
+                or existing_lead.interest == "General Inquiry"
+            ):
+                existing_lead.interest = interest
+            if business_name:
+                existing_lead.business_name = business_name
+            if emotion:
+                existing_lead.emotion = emotion
+            if buyer_intent:
+                intent_rank = {"off_topic": 0, "cold": 1, "warm": 2, "hot": 3}
+                prev_intent = existing_lead.buyer_intent
+                if intent_rank.get(buyer_intent, 0) >= intent_rank.get(prev_intent, 0):
+                    existing_lead.buyer_intent = buyer_intent
+            if sales_tactic:
+                existing_lead.sales_tactic = sales_tactic
 
-    return saved_lead
+            for field in ("specific_need", "budget", "timeline", "preferred_slot", "objection_reason", "sales_stage", "deal_summary"):
+                val = qual.get(field)
+                if isinstance(val, str) and val.strip():
+                    if field == "deal_summary" and existing_lead.deal_summary and not _is_substantive_summary(val, buyer_intent):
+                        continue
+                    setattr(existing_lead, field, val.strip())
 
-def get_all_leads() -> List[Dict[str, Any]]:
-    """Retrieve all leads stored in leads.json."""
-    init_lead_storage()
-    try:
-        with open(LEADS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+            if isinstance(qual.get("lead_score"), (int, float)):
+                prev_score = int(existing_lead.lead_score or 0)
+                existing_lead.lead_score = max(prev_score, max(0, min(100, int(qual["lead_score"]))))
 
-def delete_lead_by_id(lead_id: str) -> bool:
-    """Remove a single lead by id and return whether a record was deleted."""
+            existing_lead.updated_at = now
+            db.commit()
+            return _lead_to_dict(existing_lead)
+        else:
+            if not clean_email and not clean_phone:
+                raise ValueError("At least an email or phone number is required to create a new lead.")
+            raw_score = qual.get("lead_score")
+            lead_score = max(0, min(100, int(raw_score))) if isinstance(raw_score, (int, float)) else 75
+
+            new_lead = LeadModel(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                name=clean_name or "Interested Visitor",
+                email=clean_email,
+                phone=clean_phone,
+                interest=interest or "General Inquiry",
+                notes=notes or "Captured via Chatbot",
+                emotion=emotion or "curious",
+                buyer_intent=buyer_intent or "hot",
+                sales_tactic=sales_tactic or "Direct Lead Close",
+                sales_stage=qual.get("sales_stage") or "post_capture",
+                specific_need=qual.get("specific_need"),
+                budget=qual.get("budget"),
+                timeline=qual.get("timeline"),
+                preferred_slot=qual.get("preferred_slot"),
+                objection_reason=qual.get("objection_reason"),
+                lead_score=lead_score,
+                deal_summary=qual.get("deal_summary") or interest or "Verified Lead",
+                business_name=business_name or "General Client",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(new_lead)
+            db.commit()
+            return _lead_to_dict(new_lead)
+
+def get_all_leads(tenant_id: str = "default") -> List[Dict[str, Any]]:
+    """Retrieve all leads for a tenant ordered by latest first."""
+    init_db()
+    with SessionLocal() as db:
+        leads = db.query(LeadModel).filter_by(tenant_id=tenant_id).order_by(LeadModel.id.desc()).all()
+        return [_lead_to_dict(item) for item in leads]
+
+def delete_lead_by_id(lead_id: str, tenant_id: str = "default") -> bool:
+    """Remove a single lead by id (supports 'lead_0001' or integer string) and return success status."""
     if not lead_id:
         return False
-    leads = get_all_leads()
-    remaining = [item for item in leads if item.get("id") != lead_id]
-    if len(remaining) == len(leads):
+    init_db()
+    try:
+        numeric_id = int(str(lead_id).lower().replace("lead_", ""))
+    except ValueError:
         return False
-    with open(LEADS_FILE, "w", encoding="utf-8") as f:
-        json.dump(remaining, f, indent=2)
-    return True
 
+    with SessionLocal() as db:
+        lead = db.query(LeadModel).filter_by(tenant_id=tenant_id, id=numeric_id).first()
+        if not lead:
+            return False
+        db.delete(lead)
+        db.commit()
+        return True
 
-def clear_all_leads():
-    """Clear all captured leads."""
-    init_lead_storage()
-    with open(LEADS_FILE, "w", encoding="utf-8") as f:
-        json.dump([], f, indent=2)
+def clear_all_leads(tenant_id: str = "default"):
+    """Clear all captured leads for a tenant."""
+    init_db()
+    with SessionLocal() as db:
+        db.query(LeadModel).filter_by(tenant_id=tenant_id).delete()
+        db.commit()
