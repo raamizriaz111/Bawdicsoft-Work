@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 from backend.database import SessionLocal, init_db
 from backend.models import ActionModel, LeadModel, JobModel
+from backend.tools import book_meeting as tool_book_meeting, notify_team as tool_notify_team, update_lead as tool_update_lead
+from backend.scheduler import schedule_followup_sequence, cancel_pending_jobs
 
 class AgentDecision(BaseModel):
     """Structured result of the agent decision rules."""
@@ -58,6 +60,7 @@ class SalesAgent:
         user_profile: Dict[str, Any],
         config: Optional[Dict[str, Any]] = None,
         tenant_id: str = "default",
+        lead_id: Optional[int] = None,
     ) -> AgentDecision:
         """
         Evaluate deterministic business rules based on LLM output & session profile.
@@ -96,19 +99,21 @@ class SalesAgent:
 
         if is_human_request or is_repeated_frustration:
             action_name = "notify_team"
+            trigger_reason = "human_handoff" if is_human_request else "repeated_frustration"
             input_payload = {
-                "trigger": "human_handoff" if is_human_request else "repeated_frustration",
+                "trigger": trigger_reason,
                 "customer_name": user_name,
                 "contact": contact_label,
                 "last_message": user_message,
                 "frustration_count": frustrated_count,
             }
-            cls._log_action(
-                tenant_id=tenant_id,
+            # Execute tool notify_team
+            tool_notify_team(
+                event=trigger_reason,
+                details=input_payload,
+                lead_id=lead_id,
                 session_id=session_id,
-                tool_name=action_name,
-                input_data=input_payload,
-                output_data={"status": "queued_for_slack_whatsapp", "summary": "Human handoff alert logged"},
+                tenant_id=tenant_id,
             )
             note = f"Human handoff requested. Acknowledge with genuine warmth that {biz_name}'s human leadership has been notified and will reach out directly."
             return AgentDecision(
@@ -124,35 +129,37 @@ class SalesAgent:
         # -------------------------------------------------------------
         is_hot = buyer_intent == "hot" or lead_score >= 80
         if is_hot and has_known_contact and preferred_slot:
-            # 1. Log book_meeting action
-            book_payload = {
-                "preferred_slot": preferred_slot,
-                "attendee_name": user_name or "Interested Client",
-                "attendee_contact": contact_label,
-                "deal_summary": analysis.get("deal_summary") or user_profile.get("deal_summary"),
-            }
-            cls._log_action(
-                tenant_id=tenant_id,
+            # 1. Execute book_meeting tool
+            book_result = tool_book_meeting(
+                lead_id=lead_id,
+                attendee_name=user_name or "Interested Client",
+                attendee_email=user_email,
+                attendee_phone=user_phone,
+                slot=preferred_slot,
+                deal_summary=analysis.get("deal_summary") or user_profile.get("deal_summary"),
                 session_id=session_id,
-                tool_name="book_meeting",
-                input_data=book_payload,
-                output_data={"status": "scheduled", "slot": preferred_slot, "calendar": "Cal.com"},
+                tenant_id=tenant_id,
             )
 
-            # 2. Log notify_team action
+            # 2. Execute notify_team tool
             notify_payload = {
                 "event": "meeting_booked",
                 "slot": preferred_slot,
                 "contact": contact_label,
+                "customer_name": user_name,
                 "lead_score": lead_score,
             }
-            cls._log_action(
-                tenant_id=tenant_id,
+            tool_notify_team(
+                event="meeting_booked",
+                details=notify_payload,
+                lead_id=lead_id,
                 session_id=session_id,
-                tool_name="notify_team",
-                input_data=notify_payload,
-                output_data={"status": "sent", "channel": "whatsapp_team_alert"},
+                tenant_id=tenant_id,
             )
+
+            # 3. Cancel any remaining pending nurture jobs since meeting is booked
+            if lead_id:
+                cancel_pending_jobs(lead_id=lead_id, tenant_id=tenant_id, reason="meeting_booked")
 
             note = f"Meeting requested for '{preferred_slot}' with confirmed contact '{contact_label}'. Confirm truthfully that this slot is locked and an invite is being prepared."
             return AgentDecision(
@@ -160,7 +167,7 @@ class SalesAgent:
                 actions_logged=["book_meeting", "notify_team"],
                 runtime_note=note,
                 suggested_reply_patch=f"Perfect! I have marked down {preferred_slot} for your consultation, and our team will send calendar confirmation to {contact_label}.",
-                meta={"slot": preferred_slot, "contact": contact_label},
+                meta={"slot": preferred_slot, "contact": contact_label, "booking": book_result},
             )
 
         # -------------------------------------------------------------
@@ -185,27 +192,27 @@ class SalesAgent:
         # -------------------------------------------------------------
         is_warm = buyer_intent == "warm" or (50 <= lead_score < 80)
         if is_warm and has_known_contact:
-            action_name = "update_lead"
-            nurture_payload = {
-                "action": "queue_nurture_sequence",
-                "contact": contact_label,
-                "lead_score": lead_score,
-                "sequence": ["day0_email", "day2_whatsapp", "day5_email"],
-            }
-            cls._log_action(
-                tenant_id=tenant_id,
-                session_id=session_id,
-                tool_name=action_name,
-                input_data=nurture_payload,
-                output_data={"status": "enqueued", "next_step": "day0_email"},
-            )
+            # 1. Update lead record with stage and score
+            if lead_id:
+                tool_update_lead(
+                    lead_id=lead_id,
+                    updates={"sales_stage": "nurture", "lead_score": lead_score},
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                )
+                # 2. Schedule follow-up jobs (Day 0 email, Day 2 WhatsApp, Day 5 email)
+                schedule_followup_sequence(
+                    lead_id=lead_id,
+                    tenant_id=tenant_id,
+                    lead_data=user_profile,
+                )
 
             note = "Warm qualified lead. Follow-up sequence registered. Answer their specific questions clearly with zero aggressive pressure."
             return AgentDecision(
                 action_type="start_nurture",
-                actions_logged=[action_name],
+                actions_logged=["update_lead", "schedule_followups"],
                 runtime_note=note,
-                meta={"sequence": nurture_payload["sequence"]},
+                meta={"sequence": ["day0_email", "day2_whatsapp", "day5_email"]},
             )
 
         # -------------------------------------------------------------

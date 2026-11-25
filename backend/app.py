@@ -9,6 +9,7 @@ import io
 import csv
 import json
 import socket
+from contextlib import asynccontextmanager
 from pathlib import Path
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -40,6 +41,15 @@ from backend.session_manager import (
     init_session_storage
 )
 from backend.agent import SalesAgent, AgentDecision
+from backend.visitor_manager import link_visitor_to_lead, update_visitor_summary, get_visitor_memory
+from backend.scheduler import (
+    start_scheduler,
+    stop_scheduler,
+    get_jobs,
+    process_due_jobs,
+    cancel_pending_jobs,
+    schedule_followup_sequence,
+)
 
 # Initialize storage and LLM client
 init_lead_storage()
@@ -95,12 +105,14 @@ async def config_endpoint(request):
 async def session_endpoint(request):
     """Get or initialize visitor session."""
     session_id = request.query_params.get("sessionId", "guest-session")
-    session = get_or_create_session(session_id)
+    visitor_id = request.query_params.get("visitorId") or request.cookies.get("visitor_id")
+    session = get_or_create_session(session_id, visitor_cookie_id=visitor_id)
     return JSONResponse({
         "sessionId": session["session_id"],
         "userProfile": session["user_profile"],
         "history": session.get("messages", []),
-        "isReturning": session.get("is_returning", False)
+        "isReturning": session.get("is_returning", False),
+        "visitorId": visitor_id
     })
 
 async def transcript_endpoint(request):
@@ -120,11 +132,13 @@ async def reset_session_endpoint(request):
     try:
         body = await request.json()
         session_id = body.get("sessionId", "guest-session")
+        visitor_id = body.get("visitorId") or request.cookies.get("visitor_id")
     except Exception:
         session_id = "guest-session"
+        visitor_id = None
     
     reset = reset_session(session_id)
-    return JSONResponse({"status": "reset", "session": reset})
+    return JSONResponse({"status": "reset", "session": reset, "visitorId": visitor_id})
 
 async def chat_endpoint(request):
     """Handle chat messages, dynamic persona responses & silent lead detection."""
@@ -134,6 +148,7 @@ async def chat_endpoint(request):
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
     session_id = body.get("sessionId", "guest-session")
+    visitor_id = body.get("visitorId") or request.cookies.get("visitor_id")
     user_message = body.get("message", "").strip()
     base_config = load_active_config()
     raw_config = body.get("config")
@@ -155,8 +170,8 @@ async def chat_endpoint(request):
     if not user_message:
         return JSONResponse({"error": "Empty message"}, status_code=400)
 
-    # 1. Retrieve persistent session & profile
-    session = get_or_create_session(session_id)
+    # 1. Retrieve persistent session & profile (with visitor cookie memory)
+    session = get_or_create_session(session_id, visitor_cookie_id=visitor_id)
     profile = session.get("user_profile", {})
 
     prior_history = get_session_history(session_id)
@@ -279,7 +294,7 @@ async def chat_endpoint(request):
         or analysis["buyer_intent"] in ("hot", "warm")
         or any(qual_update.get(k) for k in ("specific_need", "budget", "timeline", "preferred_slot"))
     ):
-        save_lead(
+        saved_lead = save_lead(
             session_id=session_id,
             name=profile.get("name"),
             email=profile.get("email"),
@@ -294,6 +309,46 @@ async def chat_endpoint(request):
         )
         lead_updated = True
 
+    # 5.5 Extract numeric lead id if available
+    numeric_lead_id = None
+    if isinstance(saved_lead, dict) and saved_lead.get("id"):
+        raw_lid = str(saved_lead["id"]).replace("lead_", "")
+        numeric_lead_id = int(raw_lid) if raw_lid.isdigit() else None
+    elif profile.get("lead_id"):
+        try:
+            numeric_lead_id = int(str(profile["lead_id"]).replace("lead_", ""))
+        except Exception:
+            numeric_lead_id = None
+    elif visitor_id:
+        vis_mem = get_visitor_memory(visitor_id)
+        if vis_mem.get("lead_id"):
+            numeric_lead_id = int(vis_mem["lead_id"])
+
+    # Link visitor cookie to captured lead and update cross-session memory
+    if visitor_id:
+        if newly_shared_contact or saved_lead:
+            link_visitor_to_lead(
+                visitor_cookie_id=visitor_id,
+                lead_id=numeric_lead_id,
+                name=profile.get("name"),
+                email=profile.get("email"),
+                phone=profile.get("phone"),
+                summary=effective_summary,
+                sales_stage=analysis.get("sales_stage"),
+            )
+        elif effective_summary:
+            update_visitor_summary(
+                visitor_cookie_id=visitor_id,
+                deal_summary=effective_summary,
+                sales_stage=analysis.get("sales_stage"),
+            )
+
+    # Cancel pending nurture messages if returning qualified visitor actively replies
+    # per Developer Guide: "If visitor replies or books a meeting, cancel all remaining scheduled messages"
+    active_preferred_slot = analysis.get("preferred_slot") or profile.get("preferred_slot")
+    if numeric_lead_id and not newly_shared_contact and not active_preferred_slot:
+        cancel_pending_jobs(numeric_lead_id, tenant_id="default", reason="client_replied")
+
     # 6. Evaluate deterministic Decision Layer rules ("The LLM proposes, code decides")
     decision = SalesAgent.decide_and_act(
         session_id=session_id,
@@ -301,8 +356,13 @@ async def chat_endpoint(request):
         analysis=analysis,
         user_profile=profile,
         config=override_config,
-        tenant_id="default"
+        tenant_id="default",
+        lead_id=numeric_lead_id,
     )
+
+    # If contact was captured and no meeting was booked, enqueue follow-up sequence
+    if newly_shared_contact and numeric_lead_id and decision.action_type != "book_meeting":
+        schedule_followup_sequence(numeric_lead_id, tenant_id="default", lead_data=profile)
     reply = SalesAgent.harmonize_reply(reply, decision, profile, override_config)
     if decision.runtime_note:
         profile["_agent_directive"] = decision.runtime_note
@@ -410,11 +470,14 @@ async def get_actions_endpoint(request):
     from backend.database import SessionLocal
     from backend.models import ActionModel
     session_id = request.query_params.get("sessionId")
+    lead_id = request.query_params.get("leadId")
     limit = int(request.query_params.get("limit", 50))
     with SessionLocal() as db:
         query = db.query(ActionModel)
         if session_id:
             query = query.filter_by(session_id=session_id)
+        if lead_id and lead_id.isdigit():
+            query = query.filter_by(lead_id=int(lead_id))
         actions = query.order_by(ActionModel.id.desc()).limit(limit).all()
         return JSONResponse({
             "total": len(actions),
@@ -422,6 +485,7 @@ async def get_actions_endpoint(request):
                 {
                     "id": a.id,
                     "session_id": a.session_id,
+                    "lead_id": a.lead_id,
                     "tool_name": a.tool_name,
                     "input_data": a.input_data,
                     "output_data": a.output_data,
@@ -431,6 +495,20 @@ async def get_actions_endpoint(request):
                 for a in actions
             ]
         })
+
+async def get_jobs_endpoint(request):
+    """Retrieve scheduled follow-up jobs (pending, completed, cancelled)."""
+    lead_id = request.query_params.get("leadId")
+    numeric_lid = int(lead_id) if lead_id and lead_id.isdigit() else None
+    status = request.query_params.get("status")
+    limit = int(request.query_params.get("limit", 50))
+    jobs = get_jobs(lead_id=numeric_lid, status=status, limit=limit)
+    return JSONResponse({"total": len(jobs), "jobs": jobs})
+
+async def process_jobs_endpoint(request):
+    """Trigger manual processing of all currently due scheduled jobs."""
+    processed = process_due_jobs()
+    return JSONResponse({"status": "success", "processed_count": processed})
 
 def is_port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -468,11 +546,24 @@ routes = [
     Route("/api/leads/delete", delete_lead_endpoint, methods=["POST"]),
     Route("/api/leads/clear", clear_leads_endpoint, methods=["POST"]),
     Route("/api/actions", get_actions_endpoint, methods=["GET"]),
+    Route("/api/jobs", get_jobs_endpoint, methods=["GET"]),
+    Route("/api/jobs/process", process_jobs_endpoint, methods=["POST"]),
     Mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static"),
 ]
 
+@asynccontextmanager
+async def lifespan(app):
+    start_scheduler()
+    yield
+    stop_scheduler()
+
 DEBUG_MODE = os.environ.get("DEBUG", "false").lower() == "true"
-app = Starlette(debug=DEBUG_MODE, routes=routes, middleware=middleware)
+app = Starlette(
+    debug=DEBUG_MODE,
+    routes=routes,
+    middleware=middleware,
+    lifespan=lifespan,
+)
 
 if __name__ == "__main__":
     import uvicorn

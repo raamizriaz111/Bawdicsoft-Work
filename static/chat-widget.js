@@ -18,6 +18,7 @@
   const CONFIG = {
     apiBase: window.CHATBOT_API_BASE || scriptOrigin || "",
     storageKey: "universal_chatbot_session_id",
+    visitorStorageKey: "universal_chatbot_visitor_id",
   };
 
   function safeStorageGet(key) {
@@ -32,6 +33,33 @@
     try {
       localStorage.setItem(key, val);
     } catch (e) {}
+  }
+
+  function getCookie(name) {
+    try {
+      const match = document.cookie.match(new RegExp('(^|;\\s*)' + name + '=([^;]*)'));
+      return match ? decodeURIComponent(match[2]) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function setCookie(name, value, days) {
+    try {
+      const expires = new Date(Date.now() + (days || 365) * 864e5).toUTCString();
+      document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+    } catch (e) {}
+  }
+
+  // Cross-session persistent Visitor ID (cookie + localStorage sync)
+  let visitorId = getCookie("visitor_id") || safeStorageGet(CONFIG.visitorStorageKey);
+  if (!visitorId) {
+    visitorId = "vis_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();
+    setCookie("visitor_id", visitorId, 365);
+    safeStorageSet(CONFIG.visitorStorageKey, visitorId);
+  } else {
+    setCookie("visitor_id", visitorId, 365);
+    safeStorageSet(CONFIG.visitorStorageKey, visitorId);
   }
 
   let sessionId = safeStorageGet(CONFIG.storageKey);
@@ -390,7 +418,7 @@
   async function initSession() {
     await loadConfig();
     try {
-      const res = await fetch(`${CONFIG.apiBase}/api/session?sessionId=${encodeURIComponent(sessionId)}`, {
+      const res = await fetch(`${CONFIG.apiBase}/api/session?sessionId=${encodeURIComponent(sessionId)}&visitorId=${encodeURIComponent(visitorId)}`, {
         headers: { "bypass-tunnel-reminder": "1" }
       });
       if (res.ok) {
@@ -435,6 +463,7 @@
       const widgetContext = buildWidgetChatContext();
       const payload = {
         sessionId: sessionId,
+        visitorId: visitorId,
         message: text,
       };
       if (Object.keys(widgetContext).length > 0) {
@@ -474,7 +503,7 @@
             "Content-Type": "application/json",
             "bypass-tunnel-reminder": "1"
           },
-          body: JSON.stringify({ sessionId: sessionId })
+          body: JSON.stringify({ sessionId: sessionId, visitorId: visitorId })
         });
       } catch (e) {}
       sessionId = "session_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now();

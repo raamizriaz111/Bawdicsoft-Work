@@ -848,6 +848,7 @@ class ChatClient:
                                 parsed_result,
                                 last_user_raw=last_user_raw,
                                 config=config,
+                                user_profile=user_profile,
                             )
                             parsed_result = self._enforce_identity_integrity(
                                 parsed_result,
@@ -996,11 +997,29 @@ class ChatClient:
         return parsed
 
     @classmethod
+    def _build_returning_visitor_greeting(cls, user_profile: Dict[str, Any]) -> str:
+        u_name = (user_profile.get("name") or "").strip() or "there"
+        specific_need = user_profile.get("specific_need")
+        past_summary = user_profile.get("past_summary")
+
+        if specific_need and len(specific_need.strip()) > 2:
+            return f"Welcome back, {u_name}! Great to see you again. Are you looking to continue our discussion on your {specific_need.strip().rstrip('.')}, or did you have a new question today?"
+
+        if past_summary:
+            clean_summary = past_summary.strip().rstrip(".")
+            if len(clean_summary.split()) <= 6:
+                return f"Welcome back, {u_name}! Great to see you again. Are you looking to continue our discussion on {clean_summary}, or did you have a new question today?"
+            return f"Welcome back, {u_name}! Great to see you again. Are you looking to pick up where we left off with our earlier discussion, or did you have a new question today?"
+
+        return f"Welcome back, {u_name}! Great to see you again. How can I help you today?"
+
+    @classmethod
     def _enforce_greeting_pacing(
         cls,
         parsed: Dict[str, Any],
         last_user_raw: str,
         config: Optional[Dict[str, Any]],
+        user_profile: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Prevent over-replying or unsolicited status reports on simple standalone greetings (e.g. 'hi' or 'hello')."""
         import re
@@ -1011,6 +1030,12 @@ class ChatClient:
         has_question = any(q in clean_user for q in ("how are", "how r", "hows", "how is", "how do you", "what", "where", "can you", "?")) or "?" in (last_user_raw or "")
 
         if is_bare and not has_question:
+            if user_profile and user_profile.get("is_returning_visitor") and user_profile.get("name"):
+                parsed["reply"] = cls._build_returning_visitor_greeting(user_profile)
+                parsed["sales_stage"] = user_profile.get("sales_stage") or "post_capture"
+                parsed["sales_tactic"] = "Returning Visitor Greeting"
+                return parsed
+
             reply = parsed.get("reply", "")
             biz_name = (config or {}).get("businessName") or "our team"
 
@@ -1448,6 +1473,8 @@ class ChatClient:
         clean_ack = re.sub(r"[^a-z\s']", "", last_user_msg).strip()
         is_pure_greeting = clean_ack in self._GREETING_EXACT or self._is_greeting_message(last_user_msg)
         if is_pure_greeting:
+            if user_profile and user_profile.get("is_returning_visitor") and user_profile.get("name"):
+                return self._build_returning_visitor_greeting(user_profile)
             if is_blunt:
                 return f"{agent_name} at {biz_name} here. Tell me what you need so we can {goal[0].lower() + goal[1:] if len(goal) > 1 else goal}."
             if is_energetic:

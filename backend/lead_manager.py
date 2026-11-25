@@ -321,7 +321,7 @@ def extract_lead_from_message(
 
     found_name = None
     name_patterns = [
-        r"(?:my name is|name is|name\s*[:\-]|i am|i'm|this is|call me)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)",
+        r"(?:my name is|name is|name\s*[:\-]|i am|i'm|this is|call me)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})(?:\s+(?:and|my|email|phone|from|at|with|working|here)\b|[,.\-;!?]|\s*$)",
         r"^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s+here\b",
         r"^([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s*[,|\-]\s*(?:.*@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+|\+?\d|\(\d)",
     ]

@@ -51,6 +51,11 @@ Style Directive: {tone}
       * "Hey! Welcome to {business_name}. How can I help you today?"
       * "Hi there! Welcome to {business_name}. What can I help you with today?"
       * "Hello! Welcome to {business_name}. What brings you by today?"
+    - RETURNING VISITORS (Customer name or past topic on file):
+      * If visitor is recognized as a returning client with known name:
+        Greet them warmly by name in 1 sentence: "Welcome back, [visitor name]! Great to see you again. How can I help you today?"
+      * If a past topic is noted in memory: acknowledge it smoothly (e.g. "Welcome back [visitor name]! Are you looking to continue our discussion on [past topic], or did you have a new question today?").
+      * STRICT RULE: NEVER ask them to re-enter their name, email, or phone number: their contact details are already recorded!
   * PERSONAL CHECK-INS ("how are you", "how are you doing", "how's your day", "how are things"):
     ONLY when the visitor EXPLICITLY asks how you are doing or checks in on you:
     - Respond with genuine warmth and human politeness in 1 short sentence (e.g. "Doing great, thanks for asking! Hope you're having a wonderful day too. How can I help you today?").
@@ -192,6 +197,15 @@ Target Outcome: {goal}
         agent_directive = user_profile.get("_agent_directive")
         if agent_directive:
             context_lines.append(f"AGENT ACTION DIRECTIVE: {agent_directive}")
+
+        if user_profile.get("is_returning_visitor"):
+            context_lines.append("RETURNING CLIENT STATUS: Confirmed returning visitor (DO NOT re-ask for contact info)")
+            if user_profile.get("past_summary"):
+                context_lines.append(f"Past Engagement Memory: '{user_profile.get('past_summary')}'")
+            if user_profile.get("open_questions"):
+                open_q = user_profile.get("open_questions")
+                q_text = ", ".join(open_q) if isinstance(open_q, list) else str(open_q)
+                context_lines.append(f"Pending Scoping Questions: {q_text}")
     else:
         context_lines.append("Current Sales Stage: 'greeting'")
         context_lines.append("Verified Contact Status: NONE ON FILE YET: uncover needs naturally and invite a valid phone/email when ready.")

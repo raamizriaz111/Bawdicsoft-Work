@@ -88,8 +88,12 @@ Add your Google Gemini API key:
 GEMINI_API_KEY=your_actual_gemini_api_key_here
 GEMINI_MODEL=gemini-3.1-flash-lite
 PORT=8003
+RESEND_API_KEY=your_resend_api_key
+SENDER_EMAIL=team@your-verified-domain.com
+GMAIL_APP_PASSWORD=your_google_app_password
 ```
 *(Get a free Gemini API key from [Google AI Studio](https://aistudio.google.com/)).*
+For automatic client confirmation emails, the app queues a message after a lead provides an email address. Use a Resend API key with a sender on a verified domain, or use a `@gmail.com` sender with a Google App Password (2-Step Verification required). Never use your regular Gmail password.
 
 ### 4. Run the Server
 ```bash

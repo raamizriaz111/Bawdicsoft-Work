@@ -50,12 +50,20 @@ class Visitor(Base):
     name = Column(String(128), nullable=True)
     email = Column(String(256), nullable=True, index=True)
     phone = Column(String(64), nullable=True, index=True)
+    
+    # Persistent cross-session memory
+    lead_id = Column(Integer, ForeignKey("leads.id", ondelete="SET NULL"), nullable=True)
+    past_summary = Column(Text, nullable=True)  # Short 1-2 sentence recap of past discussions
+    sales_stage = Column(String(64), nullable=True)  # Last active sales stage
+    open_questions = Column(JSON, default=list, nullable=True)  # Pending scoping items
+    total_sessions = Column(Integer, default=1, nullable=False)
+
     first_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_seen_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     tenant = relationship("Tenant", back_populates="visitors")
     sessions = relationship("SessionModel", back_populates="visitor")
-    leads = relationship("LeadModel", back_populates="visitor")
+    leads = relationship("LeadModel", back_populates="visitor", foreign_keys="[LeadModel.visitor_id]")
 
     __table_args__ = (
         Index("ix_visitors_tenant_cookie", "tenant_id", "visitor_cookie_id", unique=True),
@@ -136,7 +144,7 @@ class LeadModel(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     tenant = relationship("Tenant", back_populates="leads")
-    visitor = relationship("Visitor", back_populates="leads")
+    visitor = relationship("Visitor", back_populates="leads", foreign_keys=[visitor_id])
     jobs = relationship("JobModel", back_populates="lead", cascade="all, delete-orphan")
 
     __table_args__ = (
@@ -152,6 +160,7 @@ class ActionModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     session_id = Column(String(128), nullable=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id", ondelete="SET NULL"), nullable=True, index=True)
     tool_name = Column(String(64), nullable=False)  # "book_meeting", "send_whatsapp", "send_email", "notify_team"
     input_data = Column(JSON, default=dict, nullable=False)
     output_data = Column(JSON, default=dict, nullable=False)

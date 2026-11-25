@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from backend.database import SessionLocal, init_db
 from backend.models import SessionModel, MessageModel
+from backend.visitor_manager import get_or_create_visitor, get_visitor_memory
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 LEGACY_SESSIONS_FILE = DATA_DIR / "sessions.json"
@@ -115,25 +116,57 @@ def _session_to_dict(sess: SessionModel, messages: Optional[List[MessageModel]] 
         "tenant_id": sess.tenant_id,
     }
 
-def get_or_create_session(session_id: str, tenant_id: str = "default") -> Dict[str, Any]:
-    """Retrieve an existing session or initialize a new one in the database."""
+def get_or_create_session(
+    session_id: str,
+    tenant_id: str = "default",
+    visitor_cookie_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Retrieve an existing session or initialize a new one with cross-session visitor memory."""
     init_db()
     with SessionLocal() as db:
+        vis_memory = get_visitor_memory(visitor_cookie_id, tenant_id=tenant_id) if visitor_cookie_id else {}
         sess = db.query(SessionModel).filter_by(tenant_id=tenant_id, session_id=session_id).first()
         now = datetime.utcnow()
         if sess:
             sess.last_active = now
             sess.is_returning = True
+            if vis_memory.get("id") and not sess.visitor_id:
+                sess.visitor_id = vis_memory["id"]
             sess.user_profile = _ensure_profile_defaults(sess.user_profile)
             db.commit()
             messages = db.query(MessageModel).filter_by(tenant_id=tenant_id, session_id=session_id).order_by(MessageModel.id.asc()).all()
             return _session_to_dict(sess, messages)
         else:
+            profile = _default_user_profile()
+            is_returning = False
+            vis_id = None
+            if visitor_cookie_id:
+                vis_record = get_or_create_visitor(visitor_cookie_id, tenant_id=tenant_id, increment_session=True)
+                vis_id = vis_record.get("id")
+                if vis_record.get("is_returning_visitor"):
+                    is_returning = True
+                    if vis_record.get("name"):
+                        profile["name"] = vis_record["name"]
+                    if vis_record.get("email"):
+                        profile["email"] = vis_record["email"]
+                    if vis_record.get("phone"):
+                        profile["phone"] = vis_record["phone"]
+                    if vis_record.get("email") or vis_record.get("phone"):
+                        profile["is_lead_captured"] = True
+                    if vis_record.get("sales_stage"):
+                        profile["sales_stage"] = vis_record["sales_stage"]
+                    if vis_record.get("lead_id"):
+                        profile["lead_id"] = vis_record["lead_id"]
+                    profile["is_returning_visitor"] = True
+                    profile["past_summary"] = vis_record.get("past_summary")
+                    profile["open_questions"] = vis_record.get("open_questions") or []
+
             new_sess = SessionModel(
                 tenant_id=tenant_id,
                 session_id=session_id,
-                is_returning=False,
-                user_profile=_default_user_profile(),
+                visitor_id=vis_id,
+                is_returning=is_returning,
+                user_profile=profile,
                 created_at=now,
                 last_active=now,
             )
